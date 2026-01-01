@@ -1,0 +1,2 @@
+[console_scripts]
+hsaj = hsaj.cli:app
