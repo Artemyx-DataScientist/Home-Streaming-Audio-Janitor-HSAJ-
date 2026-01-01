@@ -1,0 +1,14 @@
+{
+  "streams": [
+    {
+      "codec_name": "eac3",
+      "profile": "E-AC-3",
+      "tags": {
+        "title": "Regular Mix"
+      }
+    }
+  ],
+  "format": {
+    "filename": "regular.mkv"
+  }
+}

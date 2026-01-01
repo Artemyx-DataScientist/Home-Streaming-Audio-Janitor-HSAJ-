@@ -1,0 +1,12 @@
+{
+  "streams": [
+    {
+      "codec_name": "flac"
+    }
+  ],
+  "format": {
+    "tags": {
+      "encoder": "DOLBY ATMOS render"
+    }
+  }
+}

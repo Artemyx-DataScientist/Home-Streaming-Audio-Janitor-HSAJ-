@@ -1,0 +1,13 @@
+{
+  "streams": [
+    {
+      "codec_name": "truehd",
+      "tags": {
+        "description": "Dolby Atmos Presentation"
+      }
+    }
+  ],
+  "format": {
+    "filename": "movie.mkv"
+  }
+}
