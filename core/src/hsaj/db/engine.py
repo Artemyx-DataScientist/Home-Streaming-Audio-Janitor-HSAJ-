@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -9,7 +9,14 @@ from ..config import ConfigError, DatabaseConfig
 
 
 def create_sqlalchemy_url(database_path: Path) -> str:
-    return f"sqlite:///{database_path}"
+    resolved_path: Path = database_path.resolve()
+    windows_view = PureWindowsPath(database_path)
+
+    if resolved_path.drive or windows_view.drive:
+        target = resolved_path if resolved_path.drive else windows_view
+        return target.as_uri().replace("file://", "sqlite://")
+
+    return f"sqlite:///{resolved_path.as_posix()}"
 
 
 def build_engine(database: DatabaseConfig) -> Engine:
