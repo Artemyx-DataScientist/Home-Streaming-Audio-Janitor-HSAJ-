@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: B008
+import asyncio
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +13,7 @@ from .atmos import apply_atmos_moves, plan_atmos_moves
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
 from .scanner import scan_library
+from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
 
 app = typer.Typer(help="Домашнее ядро HSAJ")
 db_app = typer.Typer(help="Операции с БД")
@@ -158,6 +161,32 @@ def apply_command(
         return
 
     typer.echo(f"Перемещено файлов: {len(executed_moves)}")
+
+
+@app.command("listen", help="Подключиться к bridge и собирать события воспроизведения")
+def listen_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Путь к hsaj.yaml",
+    ),  # noqa: B008
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    ws_url = os.environ.get("HSAJ_BRIDGE_WS", DEFAULT_BRIDGE_WS_URL)
+
+    engine, _ = init_database(loaded.config.database)
+
+    def _session_factory() -> Session:
+        return Session(engine)
+
+    processor = TransportEventProcessor(session_factory=_session_factory)
+
+    try:
+        asyncio.run(listen_to_bridge(ws_url=ws_url, processor=processor))
+    except KeyboardInterrupt:
+        typer.echo("Отключение от bridge по Ctrl+C")
 
 
 if __name__ == "__main__":

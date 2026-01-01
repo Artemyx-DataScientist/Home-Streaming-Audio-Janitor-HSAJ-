@@ -13,7 +13,7 @@ def test_db_init_and_status(tmp_path: Path) -> None:
     engine, version = init_database(db_config)
 
     assert engine is not None
-    assert version == "0001_initial"
+    assert version == "0002_play_history"
 
     status = database_status(db_config)
-    assert status == "0001_initial"
+    assert status == "0002_play_history"

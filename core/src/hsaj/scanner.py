@@ -157,10 +157,9 @@ def scan_library(
 
 
 def _upsert_file(session: Session, metadata: FileMetadata, summary: ScanSummary) -> ScanSummary:
-    existing = (
-        session.execute(select(FileModel).where(FileModel.path == str(metadata.path)))
-        .scalar_one_or_none()
-    )
+    existing = session.execute(
+        select(FileModel).where(FileModel.path == str(metadata.path))
+    ).scalar_one_or_none()
     if existing is None:
         session.add(
             FileModel(

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "node-roon-api": "github:RoonLabs/node-roon-api",
-    "node-roon-api-status": "github:RoonLabs/node-roon-api-status"
+    "node-roon-api-status": "github:RoonLabs/node-roon-api-status",
+    "ws": "^8.18.0"
   }
 }

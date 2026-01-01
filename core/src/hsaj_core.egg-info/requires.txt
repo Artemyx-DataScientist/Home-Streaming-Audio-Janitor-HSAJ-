@@ -3,3 +3,4 @@ SQLAlchemy<3,>=2.0
 pydantic<3,>=2.9
 typer<0.13,>=0.12
 mutagen<2,>=1.47
+websockets<13,>=12

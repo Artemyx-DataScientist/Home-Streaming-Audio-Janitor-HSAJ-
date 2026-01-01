@@ -1,9 +1,15 @@
 import http from "node:http";
 import { createRequire } from "node:module";
 
+import { WebSocket, WebSocketServer } from "ws";
+
 const require = createRequire(import.meta.url);
 const RoonApi = require("node-roon-api");
 const RoonApiStatus = require("node-roon-api-status");
+
+const DEFAULT_WS_PATH = process.env.BRIDGE_WS_PATH ?? "/events";
+const DEFAULT_WS_INTERVAL_MS = Number.parseInt(process.env.BRIDGE_DEMO_INTERVAL ?? "15000", 10);
+const BRIDGE_SOURCE = process.env.BRIDGE_SOURCE ?? "bridge";
 
 /**
  * @typedef {"connected" | "disconnected"} RoonConnectionState
@@ -20,6 +26,140 @@ const RoonApiStatus = require("node-roon-api-status");
  * @returns {HealthResponse}
  */
 const buildHealthResponse = (roonStatus) => ({ status: "ok", roon: roonStatus });
+
+/**
+ * @typedef {Object} TransportEventPayload
+ * @property {"track_start" | "track_stop"} event
+ * @property {string} track_id
+ * @property {string} [title]
+ * @property {string} [album]
+ * @property {string} [artist]
+ * @property {string} [quality]
+ * @property {number} [duration_ms]
+ * @property {string} [timestamp]
+ * @property {string} [source]
+ */
+
+/**
+ * @param {TransportEventPayload} payload
+ * @param {string} source
+ * @returns {string}
+ */
+const buildTransportMessage = (payload, source) =>
+  JSON.stringify({
+    type: "transport_event",
+    event: {
+      ...payload,
+      timestamp: payload.timestamp ?? new Date().toISOString(),
+      source: payload.source ?? source,
+    },
+  });
+
+/**
+ * @param {http.Server} server
+ * @param {string} path
+ * @param {string} source
+ */
+const startWebSocketChannel = (server, path, source) => {
+  const wss = new WebSocketServer({ server, path });
+
+  const broadcastTransportEvent = (payload) => {
+    const message = buildTransportMessage(payload, source);
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
+    console.log(`[ws] transport_event broadcasted for track ${payload.track_id}`);
+  };
+
+  wss.on("connection", () => {
+    console.log(`[ws] client subscribed to ${path}`);
+  });
+
+  return { broadcastTransportEvent };
+};
+
+/**
+ * @param {TransportEventPayload} track
+ * @returns {TransportEventPayload}
+ */
+const normalizeTrackPayload = (track) => ({
+  ...track,
+  event: "track_start",
+});
+
+/**
+ * @param {(payload: TransportEventPayload) => void} broadcaster
+ */
+const createTransportEmitter = (broadcaster) => {
+  /** @type {string | null} */
+  let currentTrackId = null;
+
+  /**
+   * @param {TransportEventPayload} track
+   * @returns {void}
+   */
+  const trackStart = (track) => {
+    if (!track.track_id) {
+      return;
+    }
+    if (currentTrackId === track.track_id) {
+      return;
+    }
+    currentTrackId = track.track_id;
+    broadcaster(normalizeTrackPayload(track));
+  };
+
+  /**
+   * @param {"track_stop" | "track_start"} reason
+   * @returns {void}
+   */
+  const stopCurrentTrack = (reason = "track_stop") => {
+    if (!currentTrackId) {
+      return;
+    }
+    broadcaster({
+      event: reason,
+      track_id: currentTrackId,
+    });
+    currentTrackId = null;
+  };
+
+  return { trackStart, stopCurrentTrack };
+};
+
+/**
+ * @param {(track: TransportEventPayload) => void} trackStart
+ * @returns {NodeJS.Timeout}
+ */
+const startDemoTransportFeed = (trackStart) => {
+  const demoTracks = [
+    {
+      track_id: "demo-track-1",
+      title: "Demo Track 1",
+      artist: "HSAJ Dev",
+      album: "Bridge Demo",
+      quality: "lossless",
+      duration_ms: 180_000,
+    },
+    {
+      track_id: "demo-track-2",
+      title: "Demo Track 2",
+      artist: "HSAJ Dev",
+      album: "Bridge Demo",
+      quality: "atmos",
+      duration_ms: 200_000,
+    },
+  ];
+
+  let currentIndex = 0;
+  trackStart(demoTracks[currentIndex]);
+  return setInterval(() => {
+    currentIndex = (currentIndex + 1) % demoTracks.length;
+    trackStart(demoTracks[currentIndex]);
+  }, DEFAULT_WS_INTERVAL_MS);
+};
 
 /**
  * @param {{ status: RoonConnectionState }} roonConnection
@@ -61,8 +201,8 @@ const createRoonClient = (roonConnection) => {
  * @param {() => HealthResponse} healthProvider
  * @returns {http.Server}
  */
-const startHealthServer = (port, healthProvider) =>
-  http.createServer((req, res) => {
+const startHealthServer = (port, healthProvider) => {
+  const server = http.createServer((req, res) => {
     const url = req.url ? new URL(req.url, `http://${req.headers.host}`) : null;
 
     if (req.method === "GET" && url?.pathname === "/health") {
@@ -74,9 +214,13 @@ const startHealthServer = (port, healthProvider) =>
 
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ message: "Not Found" }));
-  }).listen(port, () => {
+  });
+
+  server.listen(port, () => {
     console.log(`Health endpoint listening on :${port}/health`);
   });
+  return server;
+};
 
 /**
  * Стартует dev-экземпляр bridge и подключает Roon.
@@ -84,12 +228,19 @@ const startHealthServer = (port, healthProvider) =>
  */
 const startBridge = () => {
   const port = Number.parseInt(process.env.BRIDGE_PORT ?? process.env.PORT ?? "8080", 10);
+  const wsPath = process.env.BRIDGE_WS_PATH ?? DEFAULT_WS_PATH;
   const roonConnection = { status: /** @type {RoonConnectionState} */ ("disconnected") };
 
   createRoonClient(roonConnection);
-  startHealthServer(port, () => buildHealthResponse(roonConnection.status));
+  const server = startHealthServer(port, () => buildHealthResponse(roonConnection.status));
+  const channel = startWebSocketChannel(server, wsPath, BRIDGE_SOURCE);
+  const emitter = createTransportEmitter(channel.broadcastTransportEvent);
 
-  console.log("HSAJ bridge dev server started. Waiting for external event sources...");
+  if (process.env.BRIDGE_DISABLE_DEMO !== "1") {
+    startDemoTransportFeed(emitter.trackStart);
+  }
+
+  console.log(`HSAJ bridge dev server started. WS endpoint ws://localhost:${port}${wsPath}`);
 };
 
 startBridge();

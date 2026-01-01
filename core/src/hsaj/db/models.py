@@ -46,3 +46,25 @@ class ActionLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PlayHistory(Base):
+    """История воспроизведений треков."""
+
+    __tablename__ = "play_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    quality: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    played_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    artist: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    album: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
