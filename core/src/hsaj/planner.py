@@ -9,7 +9,7 @@ from typing import Callable, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .atmos import AtmosMovePlan, plan_atmos_moves
+from .atmos import AtmosMovePlan, is_atmos, plan_atmos_moves
 from .config import HsajConfig
 from .db.models import BlockCandidate, File, RoonItemCache
 from .roon import RoonTrack, match_track_by_metadata
@@ -232,14 +232,14 @@ def build_plan(
     date_folder = current_time.date().isoformat()
     atmos_moves: list[AtmosMovePlan] = []
     if config.paths.atmos_dir is not None:
-        if atmos_detection_fn is not None:
-            atmos_moves = plan_atmos_moves(
-                session=session,
-                atmos_root=config.paths.atmos_dir,
-                detection_fn=atmos_detection_fn,
-            )
-        else:
-            atmos_moves = plan_atmos_moves(session=session, atmos_root=config.paths.atmos_dir)
+        detection_fn = atmos_detection_fn or (
+            lambda target: is_atmos(target, ffprobe_path=config.paths.ffprobe_path)
+        )
+        atmos_moves = plan_atmos_moves(
+            session=session,
+            atmos_root=config.paths.atmos_dir,
+            detection_fn=detection_fn,
+        )
 
     blocked_quarantine_due: list[QuarantineMovePlan] = []
     blocked_quarantine_future: list[QuarantineMovePlan] = []

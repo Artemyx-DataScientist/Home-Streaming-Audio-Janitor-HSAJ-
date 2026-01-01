@@ -34,15 +34,19 @@ def test_ffprobe_json_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["streams"][0]["profile"] == "E-AC-3 JOC (Dolby Atmos)"
 
 
-def test_ffprobe_json_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffprobe_json_handles_missing_binary(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     def _raise(*_: object, **__: object) -> object:
         raise FileNotFoundError("ffprobe missing")
 
     monkeypatch.setattr("subprocess.run", _raise)
+    caplog.set_level("WARNING")
 
-    result = ffprobe_json(Path("dummy.mkv"))
+    result = ffprobe_json(Path("dummy.mkv"), ffprobe_path="/usr/bin/ffprobe")
 
     assert result == {}
+    assert "ffprobe не найден, Atmos detection отключён" in caplog.text
 
 
 def test_ffprobe_json_handles_invalid_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +59,7 @@ def test_ffprobe_json_handles_invalid_output(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_is_atmos_detects_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     sample = json.loads((SAMPLES_DIR / "atmos_profile_eac3.json").read_text())
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: sample)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: sample)
 
     assert is_atmos(Path("demo.mkv")) is True
 
@@ -64,16 +68,16 @@ def test_is_atmos_detects_tags_and_skips_plain_truehd(monkeypatch: pytest.Monkey
     tagged = json.loads((SAMPLES_DIR / "atmos_stream_tag.json").read_text())
     no_atmos = json.loads((SAMPLES_DIR / "truehd_no_atmos.json").read_text())
 
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: tagged)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: tagged)
     assert is_atmos(Path("tagged.mkv")) is True
 
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: no_atmos)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: no_atmos)
     assert is_atmos(Path("plain_truehd.mkv")) is False
 
 
 def test_is_atmos_checks_format_tags(monkeypatch: pytest.MonkeyPatch) -> None:
     sample = json.loads((SAMPLES_DIR / "atmos_format_tag.json").read_text())
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: sample)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: sample)
 
     assert is_atmos(Path("format_tag.flac")) is True
 
