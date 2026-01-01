@@ -1,0 +1,14 @@
+# Node
+node_modules
+bridge/node_modules
+
+# Python
+__pycache__
+*.pyc
+core/.venv
+core/.pytest_cache
+core/.ruff_cache
+
+# IDE
+.vscode
+.idea
