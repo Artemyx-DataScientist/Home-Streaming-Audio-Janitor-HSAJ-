@@ -143,11 +143,7 @@ def test_apply_plan_moves_to_quarantine_and_logs(tmp_path: Path) -> None:
         result = apply_plan(session=session, config=config, plan=plan)
 
         assert result.quarantined
-        destination = (
-            config.paths.quarantine_dir
-            / "2024-01-10"
-            / "Artist/Album/track.flac"
-        )
+        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
         assert destination.exists()
         assert not original_path.exists()
 
@@ -190,11 +186,7 @@ def test_apply_plan_dry_run_logs_only(tmp_path: Path) -> None:
         result = apply_plan(session=session, config=config, plan=plan, dry_run=True)
         assert result.dry_run is True
         assert session.query(ActionLog).filter(ActionLog.action == "dry_run").count() == 1
-        destination = (
-            config.paths.quarantine_dir
-            / "2024-01-10"
-            / "Artist/Album/track.flac"
-        )
+        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
         assert not destination.exists()
 
 
@@ -222,11 +214,7 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         plan = _build_plan(session, config)
         apply_plan(session=session, config=config, plan=plan)
 
-        destination = (
-            config.paths.quarantine_dir
-            / "2024-01-10"
-            / "Artist/Album/track.flac"
-        )
+        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
         assert destination.exists()
 
         # конфликт: оригинал уже существует

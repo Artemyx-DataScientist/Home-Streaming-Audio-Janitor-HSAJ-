@@ -127,7 +127,9 @@ class BlockCandidate(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    planned_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    planned_action_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

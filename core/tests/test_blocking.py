@@ -88,7 +88,6 @@ def test_sync_blocked_does_not_shift_planned_on_repeat_sync() -> None:
         assert candidate.last_seen_at == _naive(later_seen)
 
 
-
 def test_sync_blocked_marks_restored_when_missing() -> None:
     seen_at = datetime(2024, 4, 1, tzinfo=timezone.utc)
     later = seen_at + timedelta(days=3)

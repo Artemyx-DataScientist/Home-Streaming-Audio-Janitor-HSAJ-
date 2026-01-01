@@ -74,7 +74,8 @@ def upsert_raw_block(
 
     existing = session.scalar(
         select(RoonBlockRaw).where(
-            RoonBlockRaw.object_type == blocked.object_type, RoonBlockRaw.object_id == blocked.object_id
+            RoonBlockRaw.object_type == blocked.object_type,
+            RoonBlockRaw.object_id == blocked.object_id,
         )
     )
     normalized_seen = _normalize_datetime(seen_at)
@@ -193,7 +194,9 @@ def sync_blocked_objects(
         if created_candidate:
             candidates_created += 1
 
-    restored_candidates = mark_restored_candidates(session=session, active_keys=active_keys, restored_at=timestamp)
+    restored_candidates = mark_restored_candidates(
+        session=session, active_keys=active_keys, restored_at=timestamp
+    )
 
     return SyncResult(
         raw_created=raw_created,

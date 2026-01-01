@@ -43,7 +43,9 @@ class RoonTrack:
             raise BridgeClientError("Поле roon_track_id пустое")
 
         duration_ms = cls._parse_optional_int(payload.get("duration_ms"))
-        track_number = cls._parse_optional_int(payload.get("trackno") or payload.get("track_number"))
+        track_number = cls._parse_optional_int(
+            payload.get("trackno") or payload.get("track_number")
+        )
 
         return cls(
             roon_track_id=roon_track_id,
@@ -94,7 +96,9 @@ def fetch_track_from_bridge(
     try:
         with urlopen(request, timeout=timeout) as response:
             if response.status != 200:
-                raise BridgeClientError(f"Bridge вернул статус {response.status} для {roon_track_id}")
+                raise BridgeClientError(
+                    f"Bridge вернул статус {response.status} для {roon_track_id}"
+                )
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError) as exc:
         raise BridgeClientError(f"Не удалось получить трек {roon_track_id}: {exc}") from exc
