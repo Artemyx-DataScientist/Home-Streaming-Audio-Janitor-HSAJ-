@@ -303,3 +303,79 @@ Roon может блокировать:
   - `enable_behavior_scoring = true`
 
 ---
+## 10. Структура репозитория
+
+hsaj/
+  README.md
+  SPEC.md
+  ARCHITECTURE.md
+  .editorconfig
+  .gitignore
+
+  configs/
+    hsaj.example.yaml
+    systemd/
+      hsaj-bridge.service
+      hsaj-core.service
+      hsaj-core.timer
+
+  docs/
+    decisions/
+      ADR-0001-bridge-separate-process.md
+      ADR-0002-atmos-immunity.md
+      ADR-0003-first-seen-timer.md
+
+  bridge/                       # Node.js Roon extension
+    package.json
+    package-lock.json
+    src/
+      index.js                  # entrypoint
+      roon.js                   # roon api wiring
+      http_server.js            # REST endpoints
+      ws_server.js              # events
+      mappers.js                # normalize track payload
+      config.js
+      logger.js
+    test/
+    scripts/
+      dev.sh
+
+  core/                         # Python core (scanner + DB + policy + executor + CLI)
+    pyproject.toml
+    uv.lock / poetry.lock
+    src/hsaj/
+      __init__.py
+      config.py
+      db/
+        __init__.py
+        models.py
+        migrate.py              # simple migrations (alembic optional later)
+        repo.py                 # DB access layer
+      fs/
+        scanner.py              # walk + tags
+        ffprobe.py              # atmos detection
+        actions.py              # move/quarantine/delete/restore
+        paths.py                # canonical path builder
+      roon/
+        client.py               # talks to bridge (http/ws)
+        events.py               # event handler
+        mapping.py              # match roon track -> file_id
+      policy/
+        blocked.py              # inheritance + candidates
+        planner.py              # build plan
+        executor.py             # apply plan safely
+      reports/
+        export.py               # json/csv/md
+      cli.py                    # `hsaj` entry
+    tests/
+    scripts/
+      dev.sh
+
+  tools/
+    make_sample_library.py
+    sample_ffprobe_outputs/
+
+  .github/
+    workflows/
+      ci.yml
+---
