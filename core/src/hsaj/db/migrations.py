@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Iterable
 
 from sqlalchemy import Engine, text
@@ -36,7 +36,10 @@ def _ensure_version_table(conn: Connection) -> None:
 
 
 def _is_applied(conn: Connection, version: str) -> bool:
-    result = conn.execute(text("SELECT 1 FROM hsaj_migrations WHERE version = :version"), {"version": version})
+    result = conn.execute(
+        text("SELECT 1 FROM hsaj_migrations WHERE version = :version"),
+        {"version": version},
+    )
     return result.first() is not None
 
 
@@ -51,7 +54,7 @@ def _mark_applied(conn: Connection, migration: Migration) -> None:
         {
             "version": migration.version,
             "description": migration.description,
-            "applied_at": datetime.utcnow().isoformat(),
+            "applied_at": datetime.now(timezone.utc).isoformat(),
         },
     )
 

@@ -23,7 +23,10 @@ class DatabaseConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    driver: str = Field(default="sqlite", description="Тип драйвера. Пока поддерживается только sqlite")
+    driver: str = Field(
+        default="sqlite",
+        description="Тип драйвера. Пока поддерживается только sqlite",
+    )
     path: Path = Field(..., description="Путь к файлу БД или DSN")
 
     @field_validator("driver")
@@ -132,7 +135,10 @@ def load_config(config_path: Path) -> LoadedConfig:
     except Exception as exc:  # pragma: no cover - защита от неожиданных ошибок
         raise ConfigError(f"Неизвестная ошибка чтения конфига: {exc}") from exc
 
-    return LoadedConfig(config=parsed.resolve_relative_paths(config_path.parent), source_path=config_path)
+    return LoadedConfig(
+        config=parsed.resolve_relative_paths(config_path.parent),
+        source_path=config_path,
+    )
 
 
 def find_config_path(explicit: Optional[Path]) -> Path:

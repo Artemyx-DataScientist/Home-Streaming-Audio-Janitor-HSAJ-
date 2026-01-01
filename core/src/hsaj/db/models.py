@@ -19,6 +19,13 @@ class File(Base):
     path: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     format: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    artist: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    album: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    track_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
