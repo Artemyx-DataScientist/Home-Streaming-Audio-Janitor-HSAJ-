@@ -30,10 +30,12 @@ npm run dev
 ```bash
 cd core
 source .venv/bin/activate
-python -m core.app
+python -m core.app  # или hsaj listen --config configs/hsaj.yaml
 ```
 
-Bridge печатает сообщение о старте, а core запускает простой обработчик событий (заглушка), которые в дальнейшем будут заменены реальными компонентами.
+Bridge печатает сообщение о старте, поднимает WebSocket-канал `/events` и рассылает события
+`transport_event` при смене трека. Core подключается по `HSAJ_BRIDGE_WS` (по умолчанию
+`ws://localhost:8080/events`), логирует и записывает историю воспроизведений в SQLite.
 
 ## CI
 GitHub Actions прогоняет линтеры и тесты для обеих частей проекта:

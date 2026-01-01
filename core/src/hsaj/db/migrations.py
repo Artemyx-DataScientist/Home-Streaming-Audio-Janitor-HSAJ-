@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from .models import Base
+from .models import Base, PlayHistory
 
 MigrationCallable = Callable[[Connection], None]
 
@@ -63,8 +63,21 @@ def _migration_v1(conn: Connection) -> None:
     Base.metadata.create_all(bind=conn)
 
 
+def _migration_v2(conn: Connection) -> None:
+    PlayHistory.__table__.create(bind=conn, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
-    Migration(version="0001_initial", description="Создание базовых таблиц", upgrade=_migration_v1),
+    Migration(
+        version="0001_initial",
+        description="Создание базовых таблиц",
+        upgrade=_migration_v1,
+    ),
+    Migration(
+        version="0002_play_history",
+        description="Добавление таблицы play_history",
+        upgrade=_migration_v2,
+    ),
 ]
 
 

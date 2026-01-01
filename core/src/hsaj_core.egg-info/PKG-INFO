@@ -9,3 +9,4 @@ Requires-Dist: SQLAlchemy<3,>=2.0
 Requires-Dist: pydantic<3,>=2.9
 Requires-Dist: typer<0.13,>=0.12
 Requires-Dist: mutagen<2,>=1.47
+Requires-Dist: websockets<13,>=12
