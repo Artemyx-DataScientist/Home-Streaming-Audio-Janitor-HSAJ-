@@ -10,7 +10,6 @@ from typing import Optional
 import typer
 from sqlalchemy.orm import Session
 
-from .atmos import apply_atmos_moves, plan_atmos_moves
 from .blocking import (
     BLOCK_GRACE_DAYS_DEFAULT,
     fetch_blocked_from_bridge,
@@ -18,6 +17,8 @@ from .blocking import (
 )
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
+from .executor import apply_plan, restore_from_quarantine
+from .planner import build_plan
 from .roon import BridgeClientError
 from .scanner import scan_library
 from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
@@ -43,14 +44,6 @@ def _read_config_or_exit(config_path: Path) -> LoadedConfig:
     except ConfigError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
-
-
-def _require_atmos_dir(loaded: LoadedConfig) -> Path:
-    atmos_dir = loaded.config.paths.atmos_dir
-    if atmos_dir is None:
-        typer.secho("В конфиге не указан paths.atmos_dir", err=True, fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    return atmos_dir
 
 
 @db_app.command("init", help="Создать SQLite и прогнать миграции")
@@ -133,19 +126,55 @@ def plan_command(
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
-    atmos_dir = _require_atmos_dir(loaded)
 
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
-        planned_moves = plan_atmos_moves(session=session, atmos_root=atmos_dir)
+        plan = build_plan(session=session, config=loaded.config)
 
-    if not planned_moves:
-        typer.echo("Atmos-файлы вне целевого каталога не найдены.")
+    if not any(
+        (
+            plan.atmos_moves,
+            plan.blocked_quarantine_due,
+            plan.blocked_quarantine_future,
+            plan.low_confidence,
+        )
+    ):
+        typer.echo("План пуст — нечего делать.")
+        typer.echo(plan.to_json())
         return
 
-    typer.echo("Запланировано перемещение Atmos-файлов:")
-    for move in planned_moves:
-        typer.echo(f"- {move.source} -> {move.destination}")
+    typer.echo("План действий:")
+    if plan.atmos_moves:
+        typer.echo("Atmos (перемещение):")
+        for move in plan.atmos_moves:
+            typer.echo(f"- file_id={move.file_id}: {move.source} -> {move.destination}")
+
+    if plan.blocked_quarantine_due:
+        typer.echo("Карантин (срок наступил):")
+        for move in plan.blocked_quarantine_due:
+            typer.echo(
+                f"- candidate_id={move.candidate_id} file_id={move.file_id}: "
+                f"{move.source} -> {move.destination} (reason={move.reason})"
+            )
+
+    if plan.blocked_quarantine_future:
+        typer.echo("Карантин (ещё не наступил):")
+        for move in plan.blocked_quarantine_future:
+            typer.echo(
+                f"- candidate_id={move.candidate_id} file_id={move.file_id}: "
+                f"{move.source} -> {move.destination} (reason={move.reason})"
+            )
+
+    if plan.low_confidence:
+        typer.echo("Низкая уверенность (нужно вмешательство):")
+        for item in plan.low_confidence:
+            typer.echo(
+                f"- candidate_id={item.candidate_id} {item.object_type}:{item.object_id} "
+                f"files={item.matched_file_ids or '[]'} reason={item.reason}"
+            )
+
+    typer.echo("JSON-представление плана:")
+    typer.echo(plan.to_json())
 
 
 @app.command("apply", help="Применить план (перенос Atmos в целевой каталог)")
@@ -156,20 +185,28 @@ def apply_command(
         "-c",
         help="Путь к hsaj.yaml",
     ),  # noqa: B008
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Только логировать действия без изменений",
+    ),  # noqa: B008
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
-    atmos_dir = _require_atmos_dir(loaded)
 
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
-        executed_moves = apply_atmos_moves(session=session, atmos_root=atmos_dir)
+        plan = build_plan(session=session, config=loaded.config)
+        result = apply_plan(session=session, config=loaded.config, plan=plan, dry_run=dry_run)
 
-    if not executed_moves:
-        typer.echo("Перемещать нечего — план пуст.")
+    if dry_run:
+        typer.echo("dry_run: действия не выполнялись, записана строчка в actions_log")
         return
 
-    typer.echo(f"Перемещено файлов: {len(executed_moves)}")
+    typer.echo(
+        f"Применено. Atmos: {len(result.applied_atmos)}, в карантин: {len(result.quarantined)}, "
+        f"пропущено: {len(result.skipped)}"
+    )
 
 
 @app.command("listen", help="Подключиться к bridge и собирать события воспроизведения")
@@ -242,6 +279,39 @@ def roon_sync_command(
         f"обновлено raw: {result.raw_updated}; новые кандидаты: {result.candidates_created}; "
         f"снято блоков: {result.candidates_restored}"
     )
+
+
+@app.command("restore", help="Восстановить файл из карантина по пути или file_id")
+def restore_command(
+    target: str,
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Путь к hsaj.yaml",
+    ),  # noqa: B008
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+
+    try:
+        file_id = int(target)
+        target_path: Path | int = file_id
+    except ValueError:
+        target_path = Path(target)
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        result = restore_from_quarantine(session=session, target=target_path)
+
+    if result.conflict:
+        typer.echo("Конфликт восстановления: целевой путь уже существует, операция отменена")
+        return
+    if result.restored_path is None:
+        typer.echo("Не удалось найти запись о карантине или файл, восстановление не выполнено")
+        return
+
+    typer.echo(f"Файл восстановлен: {result.original_path}")
 
 
 if __name__ == "__main__":
