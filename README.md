@@ -25,6 +25,7 @@ pip install -r requirements-dev.txt
 cd bridge
 npm run dev
 ```
+Для bridge откройте локальный порт в firewall; при необходимости первый запуск выполните от имени администратора, чтобы правила применились корректно.
 
 В другом терминале запускаем core:
 ```bash
@@ -36,6 +37,19 @@ python -m core.app  # или hsaj listen --config configs/hsaj.yaml
 Bridge печатает сообщение о старте, поднимает WebSocket-канал `/events` и рассылает события
 `transport_event` при смене трека. Core подключается по `HSAJ_BRIDGE_WS` (по умолчанию
 `ws://localhost:8080/events`), логирует и записывает историю воспроизведений в SQLite.
+
+### Запуск на Windows
+- Установите Node.js 18+ и Python 3.11+ (убедитесь, что `python` доступен в PATH).
+- В `core` создайте и активируйте виртуальное окружение через PowerShell:
+  ```powershell
+  cd core
+  python -m venv .venv
+  .\\.venv\\Scripts\\Activate.ps1
+  pip install -r requirements-dev.txt
+  ```
+- Конфигурацию и БД можно хранить по путям `%USERPROFILE%\\hsaj\\hsaj.yaml` и `%LOCALAPPDATA%\\hsaj\\hsaj.db`.
+- Запускайте bridge и core так же, как в разделе выше (для модулей используйте `python -m ...`).
+- systemd-юниты неприменимы; для автозапуска используйте ручной запуск, планировщик задач или NSSM.
 
 ## CI
 GitHub Actions прогоняет линтеры и тесты для обеих частей проекта:
