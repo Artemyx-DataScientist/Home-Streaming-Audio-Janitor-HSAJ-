@@ -1,0 +1,11 @@
+[Unit]
+Description=Ежедневное обслуживание HSAJ core (scan + roon sync + apply --dry-run)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=hsaj-core.service
+
+[Install]
+WantedBy=timers.target

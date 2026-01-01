@@ -1,0 +1,15 @@
+[Unit]
+Description=HSAJ Bridge (Roon extension gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/hsaj/hsaj.env
+Environment=HSAJ_ROOT=/opt/hsaj
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/bridge" && exec node src/index.js'
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
