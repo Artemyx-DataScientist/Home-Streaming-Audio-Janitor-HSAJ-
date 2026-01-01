@@ -1,0 +1,17 @@
+{
+  "streams": [
+    {
+      "codec_name": "eac3",
+      "profile": "E-AC-3 JOC (Dolby Atmos)",
+      "tags": {
+        "title": "Atmos Mix"
+      }
+    }
+  ],
+  "format": {
+    "filename": "example.mka",
+    "tags": {
+      "comment": "demo"
+    }
+  }
+}

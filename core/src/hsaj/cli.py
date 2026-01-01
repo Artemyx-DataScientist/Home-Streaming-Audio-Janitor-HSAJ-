@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from sqlalchemy.orm import Session
 
+from .atmos import apply_atmos_moves, plan_atmos_moves
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
 from .scanner import scan_library
@@ -29,6 +31,14 @@ def _read_config_or_exit(config_path: Path) -> LoadedConfig:
     except ConfigError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
+
+
+def _require_atmos_dir(loaded: LoadedConfig) -> Path:
+    atmos_dir = loaded.config.paths.atmos_dir
+    if atmos_dir is None:
+        typer.secho("В конфиге не указан paths.atmos_dir", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    return atmos_dir
 
 
 @db_app.command("init", help="Создать SQLite и прогнать миграции")
@@ -98,6 +108,56 @@ def scan_command(
             "Сканирование завершено. "
             f"Новых: {summary.created}, обновлено: {summary.updated}, пропущено: {summary.skipped}"
         )
+
+
+@app.command("plan", help="Показать запланированные действия (перенос Atmos)")
+def plan_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Путь к hsaj.yaml",
+    ),  # noqa: B008
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    atmos_dir = _require_atmos_dir(loaded)
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        planned_moves = plan_atmos_moves(session=session, atmos_root=atmos_dir)
+
+    if not planned_moves:
+        typer.echo("Atmos-файлы вне целевого каталога не найдены.")
+        return
+
+    typer.echo("Запланировано перемещение Atmos-файлов:")
+    for move in planned_moves:
+        typer.echo(f"- {move.source} -> {move.destination}")
+
+
+@app.command("apply", help="Применить план (перенос Atmos в целевой каталог)")
+def apply_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Путь к hsaj.yaml",
+    ),  # noqa: B008
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    atmos_dir = _require_atmos_dir(loaded)
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        executed_moves = apply_atmos_moves(session=session, atmos_root=atmos_dir)
+
+    if not executed_moves:
+        typer.echo("Перемещать нечего — план пуст.")
+        return
+
+    typer.echo(f"Перемещено файлов: {len(executed_moves)}")
 
 
 if __name__ == "__main__":
