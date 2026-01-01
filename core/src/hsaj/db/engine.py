@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
-from ..config import DatabaseConfig, ConfigError
+from ..config import ConfigError, DatabaseConfig
 
 
 def create_sqlalchemy_url(database_path: Path) -> str:

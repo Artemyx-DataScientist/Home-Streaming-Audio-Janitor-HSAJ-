@@ -2,6 +2,7 @@ pyproject.toml
 src/hsaj/__init__.py
 src/hsaj/cli.py
 src/hsaj/config.py
+src/hsaj/scanner.py
 src/hsaj/db/__init__.py
 src/hsaj/db/engine.py
 src/hsaj/db/migrations.py
@@ -15,3 +16,4 @@ src/hsaj_core.egg-info/top_level.txt
 tests/test_app.py
 tests/test_config.py
 tests/test_migrations.py
+tests/test_scanner.py

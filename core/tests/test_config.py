@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hsaj.config import ConfigError, LoadedConfig, HsajConfig, load_config
+from hsaj.config import ConfigError, HsajConfig, LoadedConfig, load_config
 
 
 def test_load_config_success(tmp_path: Path) -> None:
