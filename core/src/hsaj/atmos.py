@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -100,9 +101,12 @@ class AtmosMovePlan:
     album: str | None
 
 
+_INVALID_WINDOWS_CHARS = re.compile(r'[<>:"/\\\\|?*]+')
+
+
 def _sanitize_component(value: str | None, default: str) -> str:
     candidate = (value or "").strip() or default
-    sanitized = candidate.replace("/", "_").replace("\\", "_").strip()
+    sanitized = _INVALID_WINDOWS_CHARS.sub("_", candidate).strip()
     return sanitized or default
 
 

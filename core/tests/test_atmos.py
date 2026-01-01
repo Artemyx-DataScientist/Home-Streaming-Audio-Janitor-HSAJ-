@@ -10,7 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from hsaj.atmos import apply_atmos_moves, ffprobe_json, is_atmos, plan_atmos_moves
+from hsaj.atmos import (
+    apply_atmos_moves,
+    build_atmos_destination,
+    ffprobe_json,
+    is_atmos,
+    plan_atmos_moves,
+)
 from hsaj.config import DatabaseConfig
 from hsaj.db import init_database
 from hsaj.db.models import ActionLog, File
@@ -185,3 +191,23 @@ def test_plan_uses_unknown_fallbacks(tmp_path: Path) -> None:
         )
 
     assert moves[0].destination == atmos_root / "Unknown Artist" / "Unknown Album" / "misc.flac"
+
+
+def test_sanitize_component_and_path_building(tmp_path: Path) -> None:
+    atmos_root = tmp_path / "atmos"
+    file_record = File(
+        path=str(tmp_path / "Artist:One?" / "Album*Name" / "track.flac"),
+        size_bytes=None,
+        format=None,
+        mtime=None,
+        artist="Artist:One?",
+        album="Album*Name",
+        title=None,
+        track_number=None,
+        year=None,
+        duration_seconds=None,
+    )
+
+    destination = build_atmos_destination(file_record, atmos_root=atmos_root)
+
+    assert destination == atmos_root / "Artist_One_" / "Album_Name" / "track.flac"
