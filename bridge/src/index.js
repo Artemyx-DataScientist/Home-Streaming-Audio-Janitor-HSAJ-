@@ -36,6 +36,7 @@ const buildHealthResponse = (roonStatus) => ({ status: "ok", roon: roonStatus })
  * @property {string} [artist]
  * @property {string} [quality]
  * @property {number} [duration_ms]
+ * @property {number} [trackno]
  * @property {string} [timestamp]
  * @property {string} [source]
  */
@@ -134,24 +135,7 @@ const createTransportEmitter = (broadcaster) => {
  * @returns {NodeJS.Timeout}
  */
 const startDemoTransportFeed = (trackStart) => {
-  const demoTracks = [
-    {
-      track_id: "demo-track-1",
-      title: "Demo Track 1",
-      artist: "HSAJ Dev",
-      album: "Bridge Demo",
-      quality: "lossless",
-      duration_ms: 180_000,
-    },
-    {
-      track_id: "demo-track-2",
-      title: "Demo Track 2",
-      artist: "HSAJ Dev",
-      album: "Bridge Demo",
-      quality: "atmos",
-      duration_ms: 200_000,
-    },
-  ];
+  const demoTracks = DEMO_TRACKS;
 
   let currentIndex = 0;
   trackStart(demoTracks[currentIndex]);
@@ -197,11 +181,22 @@ const createRoonClient = (roonConnection) => {
 };
 
 /**
+ * @typedef {Object} TrackDetails
+ * @property {string} roon_track_id
+ * @property {string} artist
+ * @property {string} album
+ * @property {string} title
+ * @property {number} duration_ms
+ * @property {number} trackno
+ */
+
+/**
  * @param {number} port
  * @param {() => HealthResponse} healthProvider
+ * @param {(roonTrackId: string) => TrackDetails | null} trackProvider
  * @returns {http.Server}
  */
-const startHealthServer = (port, healthProvider) => {
+const startApiServer = (port, healthProvider, trackProvider) => {
   const server = http.createServer((req, res) => {
     const url = req.url ? new URL(req.url, `http://${req.headers.host}`) : null;
 
@@ -209,6 +204,21 @@ const startHealthServer = (port, healthProvider) => {
       const response = healthProvider();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(response));
+      return;
+    }
+
+    if (req.method === "GET" && url?.pathname?.startsWith("/track/")) {
+      const roonTrackId = decodeURIComponent(url.pathname.replace("/track/", ""));
+      const track = trackProvider(roonTrackId);
+
+      if (track) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(track));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: "Track not found", roon_track_id: roonTrackId }));
       return;
     }
 
@@ -222,6 +232,51 @@ const startHealthServer = (port, healthProvider) => {
   return server;
 };
 
+/** @type {Array<TransportEventPayload & TrackDetails>} */
+const DEMO_TRACKS = [
+  {
+    roon_track_id: "demo-track-1",
+    track_id: "demo-track-1",
+    title: "Demo Track 1",
+    artist: "HSAJ Dev",
+    album: "Bridge Demo",
+    quality: "lossless",
+    duration_ms: 180_000,
+    trackno: 1,
+  },
+  {
+    roon_track_id: "demo-track-2",
+    track_id: "demo-track-2",
+    title: "Demo Track 2",
+    artist: "HSAJ Dev",
+    album: "Bridge Demo",
+    quality: "atmos",
+    duration_ms: 200_000,
+    trackno: 2,
+  },
+];
+
+/**
+ * @param {string} roonTrackId
+ * @returns {TrackDetails | null}
+ */
+const getTrackDetails = (roonTrackId) => {
+  const track = DEMO_TRACKS.find(
+    (item) => item.roon_track_id === roonTrackId || item.track_id === roonTrackId,
+  );
+  if (!track) {
+    return null;
+  }
+  return {
+    roon_track_id: track.roon_track_id,
+    artist: track.artist,
+    album: track.album,
+    title: track.title,
+    duration_ms: track.duration_ms,
+    trackno: track.trackno,
+  };
+};
+
 /**
  * Стартует dev-экземпляр bridge и подключает Roon.
  * @returns {void}
@@ -232,7 +287,11 @@ const startBridge = () => {
   const roonConnection = { status: /** @type {RoonConnectionState} */ ("disconnected") };
 
   createRoonClient(roonConnection);
-  const server = startHealthServer(port, () => buildHealthResponse(roonConnection.status));
+  const server = startApiServer(
+    port,
+    () => buildHealthResponse(roonConnection.status),
+    getTrackDetails,
+  );
   const channel = startWebSocketChannel(server, wsPath, BRIDGE_SOURCE);
   const emitter = createTransportEmitter(channel.broadcastTransportEvent);
 
