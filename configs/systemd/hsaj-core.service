@@ -1,0 +1,15 @@
+[Unit]
+Description=HSAJ core maintenance (scan, roon sync, apply dry-run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/hsaj/hsaj.env
+Environment=HSAJ_ROOT=/opt/hsaj
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj scan'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj roon sync'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj apply --dry-run'
+
+[Install]
+WantedBy=multi-user.target

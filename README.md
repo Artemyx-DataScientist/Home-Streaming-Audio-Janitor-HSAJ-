@@ -42,6 +42,10 @@ GitHub Actions прогоняет линтеры и тесты для обеих
 - `npm test` в `bridge` (включает ESLint);
 - `ruff`, `black --check` и `pytest` в `core`.
 
+## Запуск под systemd
+Готовые юниты и инструкция по включению сервисов/таймера лежат в `configs/systemd` и описаны в
+[`docs/systemd.md`](docs/systemd.md).
+
 ## Структура
 - `bridge/` — Node.js-мост к внешним системам.
 - `core/` — Python-ядро с доменной логикой.
