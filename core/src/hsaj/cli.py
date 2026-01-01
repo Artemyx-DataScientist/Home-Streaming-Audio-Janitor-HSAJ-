@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: B008
 import asyncio
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -10,14 +11,22 @@ import typer
 from sqlalchemy.orm import Session
 
 from .atmos import apply_atmos_moves, plan_atmos_moves
+from .blocking import (
+    BLOCK_GRACE_DAYS_DEFAULT,
+    fetch_blocked_from_bridge,
+    sync_blocked_objects,
+)
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
+from .roon import BridgeClientError
 from .scanner import scan_library
 from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
 
 app = typer.Typer(help="Домашнее ядро HSAJ")
 db_app = typer.Typer(help="Операции с БД")
+roon_app = typer.Typer(help="Интеграция с Roon")
 app.add_typer(db_app, name="db")
+app.add_typer(roon_app, name="roon")
 
 
 def _load_config_or_exit(config_path: Optional[Path]) -> Path:
@@ -187,6 +196,52 @@ def listen_command(
         asyncio.run(listen_to_bridge(ws_url=ws_url, processor=processor))
     except KeyboardInterrupt:
         typer.echo("Отключение от bridge по Ctrl+C")
+
+
+@roon_app.command("sync", help="Синхронизировать блоки из Roon и обновить кандидатов")
+def roon_sync_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Путь к hsaj.yaml",
+    ),  # noqa: B008
+    bridge_url: Optional[str] = typer.Option(
+        None,
+        "--bridge-url",
+        help="HTTP URL bridge (по умолчанию переменные окружения или http://localhost:8080)",
+    ),  # noqa: B008
+    grace_days: int = typer.Option(
+        BLOCK_GRACE_DAYS_DEFAULT,
+        "--grace-days",
+        help="Сколько дней ждать после первого обнаружения блока",
+    ),  # noqa: B008
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+
+    try:
+        blocked = fetch_blocked_from_bridge(base_url=bridge_url)
+    except BridgeClientError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        result = sync_blocked_objects(
+            session=session,
+            blocked_items=blocked,
+            grace_period_days=grace_days,
+            seen_at=datetime.now(timezone.utc),
+        )
+        session.commit()
+
+    typer.echo(
+        "Синхронизация блоков завершена. "
+        f"Сырых блоков: {len(blocked)}; создано raw: {result.raw_created}; "
+        f"обновлено raw: {result.raw_updated}; новые кандидаты: {result.candidates_created}; "
+        f"снято блоков: {result.candidates_restored}"
+    )
 
 
 if __name__ == "__main__":

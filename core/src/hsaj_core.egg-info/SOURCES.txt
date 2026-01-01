@@ -1,6 +1,7 @@
 pyproject.toml
 src/hsaj/__init__.py
 src/hsaj/atmos.py
+src/hsaj/blocking.py
 src/hsaj/cli.py
 src/hsaj/config.py
 src/hsaj/roon.py
@@ -18,6 +19,7 @@ src/hsaj_core.egg-info/requires.txt
 src/hsaj_core.egg-info/top_level.txt
 tests/test_app.py
 tests/test_atmos.py
+tests/test_blocking.py
 tests/test_config.py
 tests/test_migrations.py
 tests/test_roon.py
