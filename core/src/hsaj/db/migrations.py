@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from .models import Base, PlayHistory, RoonItemCache
+from .models import Base, BlockCandidate, PlayHistory, RoonItemCache, RoonBlockRaw
 
 MigrationCallable = Callable[[Connection], None]
 
@@ -71,6 +71,11 @@ def _migration_v3(conn: Connection) -> None:
     RoonItemCache.__table__.create(bind=conn, checkfirst=True)
 
 
+def _migration_v4(conn: Connection) -> None:
+    RoonBlockRaw.__table__.create(bind=conn, checkfirst=True)
+    BlockCandidate.__table__.create(bind=conn, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -86,6 +91,11 @@ MIGRATIONS: list[Migration] = [
         version="0003_roon_items_cache",
         description="Добавление таблицы roon_items_cache",
         upgrade=_migration_v3,
+    ),
+    Migration(
+        version="0004_blocking_pipeline",
+        description="Добавление таблиц roon_blocks_raw и block_candidates",
+        upgrade=_migration_v4,
     ),
 ]
 

@@ -10,6 +10,7 @@ const RoonApiStatus = require("node-roon-api-status");
 const DEFAULT_WS_PATH = process.env.BRIDGE_WS_PATH ?? "/events";
 const DEFAULT_WS_INTERVAL_MS = Number.parseInt(process.env.BRIDGE_DEMO_INTERVAL ?? "15000", 10);
 const BRIDGE_SOURCE = process.env.BRIDGE_SOURCE ?? "bridge";
+const BLOCKED_ENDPOINT_ENABLED = process.env.BRIDGE_BLOCKED_NOT_IMPLEMENTED !== "1";
 
 /**
  * @typedef {"connected" | "disconnected"} RoonConnectionState
@@ -194,9 +195,10 @@ const createRoonClient = (roonConnection) => {
  * @param {number} port
  * @param {() => HealthResponse} healthProvider
  * @param {(roonTrackId: string) => TrackDetails | null} trackProvider
+ * @param {() => Array<{ type: string, id: string, label?: string }>} blockedProvider
  * @returns {http.Server}
  */
-const startApiServer = (port, healthProvider, trackProvider) => {
+const startApiServer = (port, healthProvider, trackProvider, blockedProvider) => {
   const server = http.createServer((req, res) => {
     const url = req.url ? new URL(req.url, `http://${req.headers.host}`) : null;
 
@@ -204,6 +206,17 @@ const startApiServer = (port, healthProvider, trackProvider) => {
       const response = healthProvider();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(response));
+      return;
+    }
+
+    if (req.method === "GET" && url?.pathname === "/blocked") {
+      if (!BLOCKED_ENDPOINT_ENABLED) {
+        res.writeHead(501, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "Blocked endpoint is not implemented in this build" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(blockedProvider()));
       return;
     }
 
@@ -256,6 +269,12 @@ const DEMO_TRACKS = [
   },
 ];
 
+/** @type {Array<{ type: string, id: string, label?: string }>} */
+const DEMO_BLOCKS = [
+  { type: "track", id: "demo-track-2", label: "Demo Track 2 (blocked)" },
+  { type: "artist", id: "demo-artist-1", label: "HSAJ Dev" },
+];
+
 /**
  * @param {string} roonTrackId
  * @returns {TrackDetails | null}
@@ -291,6 +310,7 @@ const startBridge = () => {
     port,
     () => buildHealthResponse(roonConnection.status),
     getTrackDetails,
+    () => DEMO_BLOCKS,
   );
   const channel = startWebSocketChannel(server, wsPath, BRIDGE_SOURCE);
   const emitter = createTransportEmitter(channel.broadcastTransportEvent);

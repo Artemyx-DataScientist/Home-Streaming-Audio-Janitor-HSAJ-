@@ -13,7 +13,7 @@ def test_db_init_and_status(tmp_path: Path) -> None:
     engine, version = init_database(db_config)
 
     assert engine is not None
-    assert version == "0003_roon_items_cache"
+    assert version == "0004_blocking_pipeline"
 
     status = database_status(db_config)
-    assert status == "0003_roon_items_cache"
+    assert status == "0004_blocking_pipeline"
