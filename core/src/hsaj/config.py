@@ -51,8 +51,12 @@ class PathsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    library_roots: list[Path] = Field(default_factory=list, description="Директории аудиотеки")
-    quarantine_dir: Optional[Path] = Field(default=None, description="Путь для карантина удалений")
+    library_roots: list[Path] = Field(
+        default_factory=list, description="Директории аудиотеки"
+    )
+    quarantine_dir: Optional[Path] = Field(
+        default=None, description="Путь для карантина удалений"
+    )
     atmos_dir: Optional[Path] = Field(default=None, description="Путь для Atmos файлов")
     inbox_dir: Optional[Path] = Field(default=None, description="Входящая директория")
 
@@ -87,7 +91,11 @@ class HsajConfig(BaseModel):
         def _resolve(path_value: Optional[Path]) -> Optional[Path]:
             if path_value is None:
                 return None
-            return path_value if path_value.is_absolute() else (base_path / path_value).resolve()
+            return (
+                path_value
+                if path_value.is_absolute()
+                else (base_path / path_value).resolve()
+            )
 
         resolved_db = self.database.model_copy()
         resolved_db.path = _resolve(self.database.path)  # type: ignore[assignment]
@@ -101,7 +109,9 @@ class HsajConfig(BaseModel):
         resolved_paths.atmos_dir = _resolve(resolved_paths.atmos_dir)
         resolved_paths.inbox_dir = _resolve(resolved_paths.inbox_dir)
 
-        return self.model_copy(update={"database": resolved_db, "paths": resolved_paths})
+        return self.model_copy(
+            update={"database": resolved_db, "paths": resolved_paths}
+        )
 
 
 @dataclass

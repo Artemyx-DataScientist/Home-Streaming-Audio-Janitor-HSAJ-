@@ -79,7 +79,9 @@ class Plan:
             "blocked_quarantine_future": [
                 _serialize_quarantine(item) for item in self.blocked_quarantine_future
             ],
-            "low_confidence": [_serialize_low_conf(item) for item in self.low_confidence],
+            "low_confidence": [
+                _serialize_low_conf(item) for item in self.low_confidence
+            ],
         }
 
     def to_json(self, *, ensure_ascii: bool = False, indent: int = 2) -> str:
@@ -239,7 +241,9 @@ def build_plan(
                 detection_fn=atmos_detection_fn,
             )
         else:
-            atmos_moves = plan_atmos_moves(session=session, atmos_root=config.paths.atmos_dir)
+            atmos_moves = plan_atmos_moves(
+                session=session, atmos_root=config.paths.atmos_dir
+            )
 
     blocked_quarantine_due: list[QuarantineMovePlan] = []
     blocked_quarantine_future: list[QuarantineMovePlan] = []

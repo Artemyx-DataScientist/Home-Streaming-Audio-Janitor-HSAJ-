@@ -40,7 +40,9 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
     file_path = library_root / "track.mp3"
     _create_id3_file(file_path)
 
-    summary_first = scan_library(engine=engine, library_roots=[library_root], dry_run=False)
+    summary_first = scan_library(
+        engine=engine, library_roots=[library_root], dry_run=False
+    )
 
     assert summary_first.found_files == 1
     assert summary_first.created == 1
@@ -59,7 +61,9 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
     file_path.write_bytes(b"updated content")
     os.utime(file_path, (new_epoch, new_epoch))
 
-    summary_second = scan_library(engine=engine, library_roots=[library_root], dry_run=False)
+    summary_second = scan_library(
+        engine=engine, library_roots=[library_root], dry_run=False
+    )
 
     assert summary_second.found_files == 1
     assert summary_second.updated == 1

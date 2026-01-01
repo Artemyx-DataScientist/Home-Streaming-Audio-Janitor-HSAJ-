@@ -24,8 +24,12 @@ paths:
 
     assert isinstance(loaded, LoadedConfig)
     assert isinstance(loaded.config, HsajConfig)
-    assert loaded.config.database.path == (config_path.parent / "data/test.db").resolve()
-    assert loaded.config.paths.library_roots == [(config_path.parent / "music").resolve()]
+    assert (
+        loaded.config.database.path == (config_path.parent / "data/test.db").resolve()
+    )
+    assert loaded.config.paths.library_roots == [
+        (config_path.parent / "music").resolve()
+    ]
 
 
 def test_load_config_empty_file(tmp_path: Path) -> None:

@@ -72,7 +72,9 @@ def test_two_track_changes_close_previous_entry() -> None:
     )
 
     with Session(engine) as session:
-        history = session.scalars(select(PlayHistory).order_by(PlayHistory.started_at)).all()
+        history = session.scalars(
+            select(PlayHistory).order_by(PlayHistory.started_at)
+        ).all()
 
         assert len(history) == 2
         assert history[0].ended_at == second_started.replace(tzinfo=None)

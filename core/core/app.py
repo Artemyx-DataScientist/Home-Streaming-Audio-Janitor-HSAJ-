@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 
 from hsaj.config import ConfigError, LoadedConfig, find_config_path, load_config
 from hsaj.db import init_database
-from hsaj.transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
+from hsaj.transport import (
+    DEFAULT_BRIDGE_WS_URL,
+    TransportEventProcessor,
+    listen_to_bridge,
+)
 
 
 def _load_config() -> LoadedConfig:
@@ -48,7 +52,9 @@ def main() -> None:
     stop_event = asyncio.Event()
 
     try:
-        asyncio.run(listen_to_bridge(ws_url=ws_url, processor=processor, stop_event=stop_event))
+        asyncio.run(
+            listen_to_bridge(ws_url=ws_url, processor=processor, stop_event=stop_event)
+        )
     except KeyboardInterrupt:
         stop_event.set()
         logging.info("Отключение от bridge по Ctrl+C")

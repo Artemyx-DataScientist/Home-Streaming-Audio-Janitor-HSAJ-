@@ -143,7 +143,9 @@ def test_apply_plan_moves_to_quarantine_and_logs(tmp_path: Path) -> None:
         result = apply_plan(session=session, config=config, plan=plan)
 
         assert result.quarantined
-        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        destination = (
+            config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        )
         assert destination.exists()
         assert not original_path.exists()
 
@@ -155,7 +157,9 @@ def test_apply_plan_moves_to_quarantine_and_logs(tmp_path: Path) -> None:
         assert refreshed_file is not None
         assert refreshed_file.path == str(destination)
 
-        log_entry = session.query(ActionLog).filter(ActionLog.action == "quarantine_move").one()
+        log_entry = (
+            session.query(ActionLog).filter(ActionLog.action == "quarantine_move").one()
+        )
         assert "candidate_id" in (log_entry.details or "")
 
         # повторный запуск не должен дублировать действия
@@ -169,7 +173,9 @@ def test_apply_plan_dry_run_logs_only(tmp_path: Path) -> None:
     engine, _ = init_database(config.database)
 
     with Session(engine) as session:
-        _create_file(session, path=config.paths.library_roots[0] / "Artist/Album/track.flac")
+        _create_file(
+            session, path=config.paths.library_roots[0] / "Artist/Album/track.flac"
+        )
         _cache_track(
             session,
             RoonTrack(
@@ -185,8 +191,12 @@ def test_apply_plan_dry_run_logs_only(tmp_path: Path) -> None:
         plan = _build_plan(session, config)
         result = apply_plan(session=session, config=config, plan=plan, dry_run=True)
         assert result.dry_run is True
-        assert session.query(ActionLog).filter(ActionLog.action == "dry_run").count() == 1
-        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        assert (
+            session.query(ActionLog).filter(ActionLog.action == "dry_run").count() == 1
+        )
+        destination = (
+            config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        )
         assert not destination.exists()
 
 
@@ -214,7 +224,9 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         plan = _build_plan(session, config)
         apply_plan(session=session, config=config, plan=plan)
 
-        destination = config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        destination = (
+            config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
+        )
         assert destination.exists()
 
         # конфликт: оригинал уже существует
@@ -222,7 +234,9 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         original_path.parent.mkdir(parents=True, exist_ok=True)
         original_path.write_text("conflict")
 
-        conflict_result = restore_from_quarantine(session=session, target=source_file.id)
+        conflict_result = restore_from_quarantine(
+            session=session, target=source_file.id
+        )
         assert conflict_result.conflict is True
 
         # успешное восстановление после удаления конфликта

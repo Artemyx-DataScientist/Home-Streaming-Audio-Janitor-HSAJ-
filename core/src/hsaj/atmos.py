@@ -45,7 +45,9 @@ def ffprobe_json(path: Path) -> dict[str, Any]:
 
     if result.returncode != 0:
         stderr_tail = (result.stderr or "").strip()
-        logger.warning("ffprobe вернул код %s для %s: %s", result.returncode, path, stderr_tail)
+        logger.warning(
+            "ffprobe вернул код %s для %s: %s", result.returncode, path, stderr_tail
+        )
         return {}
 
     try:
@@ -85,7 +87,9 @@ def is_atmos(path: Path) -> bool:
             return True
 
     format_section = probe.get("format") if isinstance(probe, dict) else None
-    if isinstance(format_section, dict) and _tags_contain_atmos(format_section.get("tags")):
+    if isinstance(format_section, dict) and _tags_contain_atmos(
+        format_section.get("tags")
+    ):
         return True
 
     return False
@@ -162,7 +166,9 @@ def apply_atmos_moves(
     detection_fn: Callable[[Path], bool] = is_atmos,
 ) -> list[AtmosMovePlan]:
     executed: list[AtmosMovePlan] = []
-    moves = plan_atmos_moves(session=session, atmos_root=atmos_root, detection_fn=detection_fn)
+    moves = plan_atmos_moves(
+        session=session, atmos_root=atmos_root, detection_fn=detection_fn
+    )
     if not moves:
         return executed
 
@@ -170,7 +176,9 @@ def apply_atmos_moves(
 
     for move in moves:
         if not move.source.exists():
-            logger.warning("Исходный файл не найден, пропускаем перемещение: %s", move.source)
+            logger.warning(
+                "Исходный файл не найден, пропускаем перемещение: %s", move.source
+            )
             continue
 
         move.destination.parent.mkdir(parents=True, exist_ok=True)

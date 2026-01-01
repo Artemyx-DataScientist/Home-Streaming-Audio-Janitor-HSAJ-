@@ -60,7 +60,9 @@ class TransportEvent:
     def from_ws_message(cls, message: str | Mapping[str, Any]) -> "TransportEvent":
         """Парсит сообщение WebSocket в TransportEvent."""
 
-        payload: Mapping[str, Any] = json.loads(message) if isinstance(message, str) else message
+        payload: Mapping[str, Any] = (
+            json.loads(message) if isinstance(message, str) else message
+        )
         if payload.get("type") != "transport_event":
             raise ValueError("Поддерживаются только сообщения type=transport_event")
 
@@ -81,11 +83,27 @@ class TransportEvent:
             track_id=track_id,
             timestamp=_parse_timestamp(str(event_payload.get("timestamp"))),
             source=str(event_payload.get("source", "bridge")),
-            user_id=str(event_payload.get("user_id")) if event_payload.get("user_id") else None,
-            quality=str(event_payload.get("quality")) if event_payload.get("quality") else None,
-            title=str(event_payload.get("title")) if event_payload.get("title") else None,
-            artist=str(event_payload.get("artist")) if event_payload.get("artist") else None,
-            album=str(event_payload.get("album")) if event_payload.get("album") else None,
+            user_id=(
+                str(event_payload.get("user_id"))
+                if event_payload.get("user_id")
+                else None
+            ),
+            quality=(
+                str(event_payload.get("quality"))
+                if event_payload.get("quality")
+                else None
+            ),
+            title=(
+                str(event_payload.get("title")) if event_payload.get("title") else None
+            ),
+            artist=(
+                str(event_payload.get("artist"))
+                if event_payload.get("artist")
+                else None
+            ),
+            album=(
+                str(event_payload.get("album")) if event_payload.get("album") else None
+            ),
             duration_ms=duration_ms,
             raw_payload=event_payload,
         )
@@ -179,7 +197,9 @@ async def listen_to_bridge(
                     if stop_event is not None and stop_event.is_set():
                         break
         except Exception as exc:  # pragma: no cover - сетевые ошибки в проде
-            processor.logger.warning("WS соединение разорвано (%s), переподключение...", exc)
+            processor.logger.warning(
+                "WS соединение разорвано (%s), переподключение...", exc
+            )
             if stop_event is not None and stop_event.is_set():
                 break
             await asyncio.sleep(reconnect_delay)

@@ -18,7 +18,9 @@ from hsaj.db.models import ActionLog, File
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / "tools" / "sample_ffprobe_outputs"
 
 
-def _mock_run(stdout: str, returncode: int = 0, stderr: str | None = None) -> Callable[..., object]:
+def _mock_run(
+    stdout: str, returncode: int = 0, stderr: str | None = None
+) -> Callable[..., object]:
     def _runner(*_: object, **__: object) -> object:
         return SimpleNamespace(stdout=stdout, returncode=returncode, stderr=stderr)
 
@@ -60,7 +62,9 @@ def test_is_atmos_detects_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     assert is_atmos(Path("demo.mkv")) is True
 
 
-def test_is_atmos_detects_tags_and_skips_plain_truehd(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_atmos_detects_tags_and_skips_plain_truehd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tagged = json.loads((SAMPLES_DIR / "atmos_stream_tag.json").read_text())
     no_atmos = json.loads((SAMPLES_DIR / "truehd_no_atmos.json").read_text())
 
@@ -119,12 +123,16 @@ def test_plan_and_apply_moves_atmos_files(tmp_path: Path) -> None:
         return path == source_path.resolve()
 
     with Session(engine) as check_session:
-        plan = plan_atmos_moves(check_session, atmos_root=atmos_root, detection_fn=detection)
+        plan = plan_atmos_moves(
+            check_session, atmos_root=atmos_root, detection_fn=detection
+        )
         assert len(plan) == 1
         assert plan[0].destination == atmos_root / "Artist" / "Album" / "track.flac"
 
     with Session(engine) as apply_session:
-        applied = apply_atmos_moves(apply_session, atmos_root=atmos_root, detection_fn=detection)
+        applied = apply_atmos_moves(
+            apply_session, atmos_root=atmos_root, detection_fn=detection
+        )
         assert len(applied) == 1
 
     destination = atmos_root / "Artist" / "Album" / "track.flac"
@@ -184,4 +192,7 @@ def test_plan_uses_unknown_fallbacks(tmp_path: Path) -> None:
             detection_fn=lambda _: True,
         )
 
-    assert moves[0].destination == atmos_root / "Unknown Artist" / "Unknown Album" / "misc.flac"
+    assert (
+        moves[0].destination
+        == atmos_root / "Unknown Artist" / "Unknown Album" / "misc.flac"
+    )

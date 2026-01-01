@@ -156,7 +156,9 @@ def scan_library(
     return summary
 
 
-def _upsert_file(session: Session, metadata: FileMetadata, summary: ScanSummary) -> ScanSummary:
+def _upsert_file(
+    session: Session, metadata: FileMetadata, summary: ScanSummary
+) -> ScanSummary:
     existing = session.execute(
         select(FileModel).where(FileModel.path == str(metadata.path))
     ).scalar_one_or_none()
@@ -188,7 +190,9 @@ def _upsert_file(session: Session, metadata: FileMetadata, summary: ScanSummary)
     updated |= _assign_if_changed(existing, "title", metadata.title)
     updated |= _assign_if_changed(existing, "track_number", metadata.track_number)
     updated |= _assign_if_changed(existing, "year", metadata.year)
-    updated |= _assign_if_changed(existing, "duration_seconds", metadata.duration_seconds)
+    updated |= _assign_if_changed(
+        existing, "duration_seconds", metadata.duration_seconds
+    )
 
     if updated:
         summary.updated += 1

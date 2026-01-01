@@ -63,7 +63,9 @@ class RoonTrack:
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
-            raise BridgeClientError(f"Невозможно привести значение к int: {value}") from exc
+            raise BridgeClientError(
+                f"Невозможно привести значение к int: {value}"
+            ) from exc
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,9 @@ def fetch_track_from_bridge(
 ) -> RoonTrack:
     """Получает нормализованные данные трека из bridge по HTTP."""
 
-    bridge_base = base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
+    bridge_base = (
+        base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
+    )
     url = f"{bridge_base.rstrip('/')}/track/{quote(roon_track_id)}"
     request = Request(url, headers={"Accept": "application/json"})
 
@@ -101,7 +105,9 @@ def fetch_track_from_bridge(
                 )
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError) as exc:
-        raise BridgeClientError(f"Не удалось получить трек {roon_track_id}: {exc}") from exc
+        raise BridgeClientError(
+            f"Не удалось получить трек {roon_track_id}: {exc}"
+        ) from exc
 
     return RoonTrack.from_dict(payload)
 
@@ -164,7 +170,9 @@ def match_track_by_metadata(
         return MappingResult(confidence="low", candidates=[])
 
     candidates = session.scalars(select(File).where(*filters)).all()
-    file_candidates = [FileCandidate(file_id=item.id, path=item.path) for item in candidates]
+    file_candidates = [
+        FileCandidate(file_id=item.id, path=item.path) for item in candidates
+    ]
 
     confidence: Literal["high", "low"] = "high" if len(file_candidates) == 1 else "low"
     return MappingResult(confidence=confidence, candidates=file_candidates)

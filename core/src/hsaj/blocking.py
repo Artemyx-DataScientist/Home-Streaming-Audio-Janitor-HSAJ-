@@ -179,7 +179,9 @@ def sync_blocked_objects(
 
     for item in blocked_items:
         active_keys.add((item.object_type, item.object_id))
-        _, created_raw = upsert_raw_block(session=session, blocked=item, seen_at=timestamp)
+        _, created_raw = upsert_raw_block(
+            session=session, blocked=item, seen_at=timestamp
+        )
         if created_raw:
             raw_created += 1
         else:
@@ -212,17 +214,23 @@ def fetch_blocked_from_bridge(
 ) -> list[BlockedObject]:
     """Получает список заблокированных объектов из bridge."""
 
-    bridge_base = base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
+    bridge_base = (
+        base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
+    )
     url = f"{bridge_base.rstrip('/')}/blocked"
     request = Request(url, headers={"Accept": "application/json"})
 
     try:
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - контролируемый URL
+        with urlopen(
+            request, timeout=timeout
+        ) as response:  # noqa: S310 - контролируемый URL
             payload = response.read().decode("utf-8")
             if response.status == 501:
                 raise BridgeClientError("Bridge не поддерживает /blocked (501)")
             if response.status != 200:
-                raise BridgeClientError(f"Bridge вернул статус {response.status} для /blocked")
+                raise BridgeClientError(
+                    f"Bridge вернул статус {response.status} для /blocked"
+                )
     except (HTTPError, URLError, TimeoutError) as exc:
         raise BridgeClientError(f"Не удалось получить /blocked: {exc}") from exc
 

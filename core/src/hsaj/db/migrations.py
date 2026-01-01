@@ -100,7 +100,9 @@ MIGRATIONS: list[Migration] = [
 ]
 
 
-def apply_migrations(engine: Engine, migrations: Iterable[Migration] | None = None) -> str | None:
+def apply_migrations(
+    engine: Engine, migrations: Iterable[Migration] | None = None
+) -> str | None:
     """Применяет миграции по порядку и возвращает последнюю применённую версию."""
 
     migration_plan = list(migrations or MIGRATIONS)

@@ -79,7 +79,9 @@ def db_status(
         typer.echo(f"Текущая версия схемы: {version}")
 
 
-@app.command("scan", help="Просканировать директории библиотеки и обновить таблицу files")
+@app.command(
+    "scan", help="Просканировать директории библиотеки и обновить таблицу files"
+)
 def scan_command(
     config: Optional[Path] = typer.Option(
         None,
@@ -96,7 +98,9 @@ def scan_command(
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
     if not loaded.config.paths.library_roots:
-        typer.secho("В конфиге не заданы paths.library_roots", err=True, fg=typer.colors.RED)
+        typer.secho(
+            "В конфиге не заданы paths.library_roots", err=True, fg=typer.colors.RED
+        )
         raise typer.Exit(code=1)
 
     engine, _ = init_database(loaded.config.database)
@@ -197,7 +201,9 @@ def apply_command(
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
         plan = build_plan(session=session, config=loaded.config)
-        result = apply_plan(session=session, config=loaded.config, plan=plan, dry_run=dry_run)
+        result = apply_plan(
+            session=session, config=loaded.config, plan=plan, dry_run=dry_run
+        )
 
     if dry_run:
         typer.echo("dry_run: действия не выполнялись, записана строчка в actions_log")
@@ -305,10 +311,14 @@ def restore_command(
         result = restore_from_quarantine(session=session, target=target_path)
 
     if result.conflict:
-        typer.echo("Конфликт восстановления: целевой путь уже существует, операция отменена")
+        typer.echo(
+            "Конфликт восстановления: целевой путь уже существует, операция отменена"
+        )
         return
     if result.restored_path is None:
-        typer.echo("Не удалось найти запись о карантине или файл, восстановление не выполнено")
+        typer.echo(
+            "Не удалось найти запись о карантине или файл, восстановление не выполнено"
+        )
         return
 
     typer.echo(f"Файл восстановлен: {result.original_path}")

@@ -59,7 +59,9 @@ def _apply_atmos_moves(
         if move.destination.exists():
             continue
         if not move.source.exists():
-            logger.warning("Источник отсутствует, пропускаем перемещение Atmos: %s", move.source)
+            logger.warning(
+                "Источник отсутствует, пропускаем перемещение Atmos: %s", move.source
+            )
             continue
 
         if not dry_run:
@@ -94,7 +96,9 @@ def _apply_quarantine_moves(
         if move.destination.exists() and not move.source.exists():
             continue
         if not move.source.exists():
-            logger.warning("Источник отсутствует, пропускаем перенос в карантин: %s", move.source)
+            logger.warning(
+                "Источник отсутствует, пропускаем перенос в карантин: %s", move.source
+            )
             continue
 
         if not dry_run:
@@ -143,7 +147,9 @@ def apply_plan(
 
     config.paths.quarantine_dir.mkdir(parents=True, exist_ok=True)
 
-    applied_atmos = _apply_atmos_moves(session=session, moves=plan.atmos_moves, dry_run=dry_run)
+    applied_atmos = _apply_atmos_moves(
+        session=session, moves=plan.atmos_moves, dry_run=dry_run
+    )
     quarantined = _apply_quarantine_moves(
         session=session,
         moves=plan.blocked_quarantine_due,
@@ -170,7 +176,9 @@ class RestoreResult:
 def _find_quarantine_log(session: Session, target: Path) -> ActionLog | None:
     return session.scalars(
         select(ActionLog)
-        .where(ActionLog.action == "quarantine_move", ActionLog.target_path == str(target))
+        .where(
+            ActionLog.action == "quarantine_move", ActionLog.target_path == str(target)
+        )
         .order_by(ActionLog.id.desc())
     ).first()
 
@@ -193,7 +201,9 @@ def restore_from_quarantine(session: Session, target: Path | int) -> RestoreResu
 
     log_entry = _find_quarantine_log(session=session, target=target_path)
     if log_entry is None:
-        return RestoreResult(restored_path=None, original_path=None, conflict=False, logged=False)
+        return RestoreResult(
+            restored_path=None, original_path=None, conflict=False, logged=False
+        )
 
     try:
         details = json.loads(log_entry.details or "{}")
@@ -201,7 +211,9 @@ def restore_from_quarantine(session: Session, target: Path | int) -> RestoreResu
         details = {}
     original_path_str = details.get("from")
     if not original_path_str:
-        return RestoreResult(restored_path=None, original_path=None, conflict=False, logged=False)
+        return RestoreResult(
+            restored_path=None, original_path=None, conflict=False, logged=False
+        )
 
     original_path = Path(original_path_str)
     if original_path.exists():
@@ -230,7 +242,9 @@ def restore_from_quarantine(session: Session, target: Path | int) -> RestoreResu
     original_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(target_path), original_path)
 
-    file_record = file_record or session.scalar(select(File).where(File.path == str(target_path)))
+    file_record = file_record or session.scalar(
+        select(File).where(File.path == str(target_path))
+    )
     if file_record is not None:
         file_record.path = str(original_path)
 
@@ -245,7 +259,10 @@ def restore_from_quarantine(session: Session, target: Path | int) -> RestoreResu
         session=session,
         action="restore_from_quarantine",
         target_path=original_path,
-        details={"from": str(target_path), "file_id": file_record.id if file_record else None},
+        details={
+            "from": str(target_path),
+            "file_id": file_record.id if file_record else None,
+        },
     )
     session.commit()
     return RestoreResult(
