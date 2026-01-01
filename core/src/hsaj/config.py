@@ -55,6 +55,7 @@ class PathsConfig(BaseModel):
     quarantine_dir: Optional[Path] = Field(default=None, description="Путь для карантина удалений")
     atmos_dir: Optional[Path] = Field(default=None, description="Путь для Atmos файлов")
     inbox_dir: Optional[Path] = Field(default=None, description="Входящая директория")
+    ffprobe_path: str = Field(default="ffprobe", description="Путь к бинарю ffprobe")
 
     @field_validator("library_roots", mode="before")
     @classmethod
@@ -71,6 +72,14 @@ class PathsConfig(BaseModel):
         if value is None:
             return None
         return Path(value)
+
+    @field_validator("ffprobe_path")
+    @classmethod
+    def normalize_ffprobe_path(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ConfigError("paths.ffprobe_path не может быть пустым")
+        return str(Path(cleaned).expanduser())
 
 
 class HsajConfig(BaseModel):
@@ -100,6 +109,12 @@ class HsajConfig(BaseModel):
         resolved_paths.quarantine_dir = _resolve(resolved_paths.quarantine_dir)
         resolved_paths.atmos_dir = _resolve(resolved_paths.atmos_dir)
         resolved_paths.inbox_dir = _resolve(resolved_paths.inbox_dir)
+
+        ffprobe_candidate = Path(resolved_paths.ffprobe_path)
+        if ffprobe_candidate.is_absolute():
+            resolved_paths.ffprobe_path = str(ffprobe_candidate)
+        elif ffprobe_candidate.parent != Path("."):
+            resolved_paths.ffprobe_path = str((base_path / ffprobe_candidate).resolve())
 
         return self.model_copy(update={"database": resolved_db, "paths": resolved_paths})
 

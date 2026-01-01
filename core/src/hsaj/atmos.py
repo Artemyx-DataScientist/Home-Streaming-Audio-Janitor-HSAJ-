@@ -17,13 +17,13 @@ from .db.models import File as FileModel
 logger = logging.getLogger(__name__)
 
 
-def ffprobe_json(path: Path) -> dict[str, Any]:
+def ffprobe_json(path: Path, *, ffprobe_path: str = "ffprobe") -> dict[str, Any]:
     """Возвращает JSON-структуру ffprobe для указанного файла."""
 
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                ffprobe_path,
                 "-v",
                 "quiet",
                 "-print_format",
@@ -37,7 +37,7 @@ def ffprobe_json(path: Path) -> dict[str, Any]:
             check=False,
         )
     except FileNotFoundError:
-        logger.warning("ffprobe не найден в PATH")
+        logger.warning("ffprobe не найден, Atmos detection отключён")
         return {}
     except Exception as exc:  # pragma: no cover - защитный блок
         logger.warning("Ошибка запуска ffprobe для %s: %s", path, exc)
@@ -69,10 +69,10 @@ def _tags_contain_atmos(tags: Any) -> bool:
     return any(_value_contains_atmos(value) for value in tags.values())
 
 
-def is_atmos(path: Path) -> bool:
+def is_atmos(path: Path, *, ffprobe_path: str = "ffprobe") -> bool:
     """Определяет наличие Atmos в файле по профилю или тегам (регистр не важен)."""
 
-    probe = ffprobe_json(path)
+    probe = ffprobe_json(path, ffprobe_path=ffprobe_path)
 
     streams = probe.get("streams", []) if isinstance(probe, dict) else []
     for stream in streams:
