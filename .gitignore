@@ -12,3 +12,4 @@ core/.ruff_cache
 # IDE
 .vscode
 .idea
+/core/uv.lock
