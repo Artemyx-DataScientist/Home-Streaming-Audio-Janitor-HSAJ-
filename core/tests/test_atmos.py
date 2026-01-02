@@ -10,7 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from hsaj.atmos import apply_atmos_moves, ffprobe_json, is_atmos, plan_atmos_moves
+from hsaj.atmos import (
+    apply_atmos_moves,
+    build_atmos_destination,
+    ffprobe_json,
+    is_atmos,
+    plan_atmos_moves,
+)
 from hsaj.config import DatabaseConfig
 from hsaj.db import init_database
 from hsaj.db.models import ActionLog, File
@@ -18,9 +24,7 @@ from hsaj.db.models import ActionLog, File
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / "tools" / "sample_ffprobe_outputs"
 
 
-def _mock_run(
-    stdout: str, returncode: int = 0, stderr: str | None = None
-) -> Callable[..., object]:
+def _mock_run(stdout: str, returncode: int = 0, stderr: str | None = None) -> Callable[..., object]:
     def _runner(*_: object, **__: object) -> object:
         return SimpleNamespace(stdout=stdout, returncode=returncode, stderr=stderr)
 
@@ -36,15 +40,19 @@ def test_ffprobe_json_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["streams"][0]["profile"] == "E-AC-3 JOC (Dolby Atmos)"
 
 
-def test_ffprobe_json_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffprobe_json_handles_missing_binary(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     def _raise(*_: object, **__: object) -> object:
         raise FileNotFoundError("ffprobe missing")
 
     monkeypatch.setattr("subprocess.run", _raise)
+    caplog.set_level("WARNING")
 
-    result = ffprobe_json(Path("dummy.mkv"))
+    result = ffprobe_json(Path("dummy.mkv"), ffprobe_path="/usr/bin/ffprobe")
 
     assert result == {}
+    assert "ffprobe не найден, Atmos detection отключён" in caplog.text
 
 
 def test_ffprobe_json_handles_invalid_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,27 +65,25 @@ def test_ffprobe_json_handles_invalid_output(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_is_atmos_detects_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     sample = json.loads((SAMPLES_DIR / "atmos_profile_eac3.json").read_text())
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: sample)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: sample)
 
     assert is_atmos(Path("demo.mkv")) is True
 
 
-def test_is_atmos_detects_tags_and_skips_plain_truehd(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_is_atmos_detects_tags_and_skips_plain_truehd(monkeypatch: pytest.MonkeyPatch) -> None:
     tagged = json.loads((SAMPLES_DIR / "atmos_stream_tag.json").read_text())
     no_atmos = json.loads((SAMPLES_DIR / "truehd_no_atmos.json").read_text())
 
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: tagged)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: tagged)
     assert is_atmos(Path("tagged.mkv")) is True
 
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: no_atmos)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: no_atmos)
     assert is_atmos(Path("plain_truehd.mkv")) is False
 
 
 def test_is_atmos_checks_format_tags(monkeypatch: pytest.MonkeyPatch) -> None:
     sample = json.loads((SAMPLES_DIR / "atmos_format_tag.json").read_text())
-    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda _: sample)
+    monkeypatch.setattr("hsaj.atmos.ffprobe_json", lambda *_args, **_kwargs: sample)
 
     assert is_atmos(Path("format_tag.flac")) is True
 
@@ -123,16 +129,12 @@ def test_plan_and_apply_moves_atmos_files(tmp_path: Path) -> None:
         return path == source_path.resolve()
 
     with Session(engine) as check_session:
-        plan = plan_atmos_moves(
-            check_session, atmos_root=atmos_root, detection_fn=detection
-        )
+        plan = plan_atmos_moves(check_session, atmos_root=atmos_root, detection_fn=detection)
         assert len(plan) == 1
         assert plan[0].destination == atmos_root / "Artist" / "Album" / "track.flac"
 
     with Session(engine) as apply_session:
-        applied = apply_atmos_moves(
-            apply_session, atmos_root=atmos_root, detection_fn=detection
-        )
+        applied = apply_atmos_moves(apply_session, atmos_root=atmos_root, detection_fn=detection)
         assert len(applied) == 1
 
     destination = atmos_root / "Artist" / "Album" / "track.flac"
@@ -192,7 +194,24 @@ def test_plan_uses_unknown_fallbacks(tmp_path: Path) -> None:
             detection_fn=lambda _: True,
         )
 
-    assert (
-        moves[0].destination
-        == atmos_root / "Unknown Artist" / "Unknown Album" / "misc.flac"
+    assert moves[0].destination == atmos_root / "Unknown Artist" / "Unknown Album" / "misc.flac"
+
+
+def test_sanitize_component_and_path_building(tmp_path: Path) -> None:
+    atmos_root = tmp_path / "atmos"
+    file_record = File(
+        path=str(tmp_path / "Artist:One?" / "Album*Name" / "track.flac"),
+        size_bytes=None,
+        format=None,
+        mtime=None,
+        artist="Artist:One?",
+        album="Album*Name",
+        title=None,
+        track_number=None,
+        year=None,
+        duration_seconds=None,
     )
+
+    destination = build_atmos_destination(file_record, atmos_root=atmos_root)
+
+    assert destination == atmos_root / "Artist_One_" / "Album_Name" / "track.flac"
