@@ -129,8 +129,10 @@ def _apply_quarantine_moves(
 ) -> list[QuarantineMovePlan]:
     quarantined: list[QuarantineMovePlan] = []
     for move in moves:
-        candidate = session.get(BlockCandidate, move.candidate_id)
-        if candidate is None:
+        candidate = (
+            session.get(BlockCandidate, move.candidate_id) if move.candidate_id > 0 else None
+        )
+        if move.candidate_id > 0 and candidate is None:
             continue
         if move.destination.exists() and not move.source.exists():
             continue
@@ -148,9 +150,10 @@ def _apply_quarantine_moves(
             move.destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(move.source), move.destination)
             file_record.path = str(move.destination)
-            candidate.status = "quarantined"
-            candidate.last_transition_at = utc_now()
-            if config.policy.quarantine_delete_days > 0:
+            if candidate is not None:
+                candidate.status = "quarantined"
+                candidate.last_transition_at = utc_now()
+            if candidate is not None and config.policy.quarantine_delete_days > 0:
                 candidate.delete_after = utc_now() + timedelta(
                     days=config.policy.quarantine_delete_days
                 )

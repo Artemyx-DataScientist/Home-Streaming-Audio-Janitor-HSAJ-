@@ -16,6 +16,7 @@ from .models import (
     LibraryTrack,
     PlanRun,
     PlayHistory,
+    ReviewDecision,
     RoonBlockRaw,
     RoonItemCache,
 )
@@ -203,6 +204,10 @@ def _migration_v8(conn: Connection) -> None:
     LibraryTrack.__table__.create(bind=conn, checkfirst=True)
 
 
+def _migration_v9(conn: Connection) -> None:
+    ReviewDecision.__table__.create(bind=conn, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -243,6 +248,11 @@ MIGRATIONS: list[Migration] = [
         version="0008_normalized_library_graph",
         description="Add normalized artist, album, and track graph tables",
         upgrade=_migration_v8,
+    ),
+    Migration(
+        version="0009_review_decisions",
+        description="Add persistent operator review decisions for advisory candidates",
+        upgrade=_migration_v9,
     ),
 ]
 

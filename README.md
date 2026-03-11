@@ -106,6 +106,10 @@ Common commands:
 - `POST /restore`
 - `POST /cleanup`
 - `GET /candidates`
+- `GET /soft-candidates`
+- `GET /reviews`
+- `POST /soft-review-preview`
+- `POST /soft-review-action`
 - `GET /actions`
 - `GET /stats`
 - `GET /exemptions`
@@ -114,6 +118,11 @@ Common commands:
 
 If `security.operator_token` or `HSAJ_OPERATOR_TOKEN` is set, operator routes require
 `X-HSAJ-Operator-Token`. Health, live, ready, and metrics remain available for probes.
+
+Soft candidates are advisory only. Operators can:
+- dismiss them, which suppresses the same advisory signal for that file
+- convert them into a file-level exemption
+- create a preview quarantine plan and then apply it explicitly
 
 ## CI
 

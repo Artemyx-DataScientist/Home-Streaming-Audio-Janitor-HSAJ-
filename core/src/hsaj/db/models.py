@@ -325,3 +325,20 @@ class PlanRun(Base):
         UtcDateTime(), server_default=func.now(), nullable=False
     )
     applied_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+
+
+class ReviewDecision(Base):
+    """Persistent operator review decisions for advisory candidates."""
+
+    __tablename__ = "review_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    review_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    candidate_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), server_default=func.now(), nullable=False
+    )

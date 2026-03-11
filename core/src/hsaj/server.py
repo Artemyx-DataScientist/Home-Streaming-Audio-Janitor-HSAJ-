@@ -17,6 +17,8 @@ from .operator_service import (
     apply_preview_payload,
     candidates_payload,
     cleanup_payload,
+    create_soft_review_action_payload,
+    create_soft_review_preview_payload,
     create_exemption_payload,
     deactivate_exemption_payload,
     exemptions_payload,
@@ -25,7 +27,9 @@ from .operator_service import (
     metrics_payload,
     plan_preview_payload,
     readiness_payload,
+    reviews_payload,
     restore_payload,
+    soft_candidates_payload,
     stats_payload,
 )
 
@@ -43,11 +47,17 @@ OPERATOR_HTML = """<!doctype html>
     body { margin: 0; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg, #f0e5d6 0%%, var(--bg) 100%%); color: var(--ink); }
     header { padding: 24px 28px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,0.6); backdrop-filter: blur(8px); }
     h1 { margin: 0; font-size: 30px; letter-spacing: 0.04em; text-transform: uppercase; }
-    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; padding: 24px; }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; padding: 24px; }
     section { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 10px 30px rgba(29,27,24,0.06); }
     h2 { margin-top: 0; font-size: 18px; }
     button { background: var(--accent); color: white; border: 0; border-radius: 999px; padding: 10px 16px; cursor: pointer; }
+    button.secondary { background: #73614f; }
+    button.muted { background: #b8a793; color: #201b17; }
     pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.4; }
+    .soft-item { border-top: 1px solid var(--line); padding: 12px 0; }
+    .soft-item:first-child { border-top: 0; padding-top: 0; }
+    .soft-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .soft-meta { font-size: 12px; opacity: 0.8; }
   </style>
 </head>
 <body>
@@ -71,8 +81,16 @@ OPERATOR_HTML = """<!doctype html>
       <pre id="candidates"></pre>
     </section>
     <section>
+      <h2>Soft Review</h2>
+      <div id="soft-candidates"></div>
+    </section>
+    <section>
       <h2>Actions</h2>
       <pre id="actions"></pre>
+    </section>
+    <section>
+      <h2>Review History</h2>
+      <pre id="reviews"></pre>
     </section>
   </main>
   <script>
@@ -87,6 +105,8 @@ OPERATOR_HTML = """<!doctype html>
       document.getElementById("stats").textContent = JSON.stringify(await fetchJson("/stats"), null, 2);
       document.getElementById("candidates").textContent = JSON.stringify(await fetchJson("/candidates"), null, 2);
       document.getElementById("actions").textContent = JSON.stringify(await fetchJson("/actions"), null, 2);
+      document.getElementById("reviews").textContent = JSON.stringify(await fetchJson("/reviews"), null, 2);
+      await refreshSoftCandidates();
     }
     async function loadPlan() {
       const payload = await fetchJson("/plan");
@@ -101,6 +121,65 @@ OPERATOR_HTML = """<!doctype html>
       });
       document.getElementById("plan").textContent = JSON.stringify(payload, null, 2);
       await refreshAll();
+    }
+    async function refreshSoftCandidates() {
+      const payload = await fetchJson("/soft-candidates");
+      const root = document.getElementById("soft-candidates");
+      root.innerHTML = "";
+      if (!payload.length) {
+        root.textContent = "No soft candidates.";
+        return;
+      }
+      payload.forEach((item) => {
+        const box = document.createElement("div");
+        box.className = "soft-item";
+        const title = document.createElement("strong");
+        title.textContent = item.reason + " #" + item.file_id;
+        box.appendChild(title);
+        const meta = document.createElement("div");
+        meta.className = "soft-meta";
+        meta.textContent = item.source + (item.review_status ? " | review: " + item.review_status : "");
+        box.appendChild(meta);
+        const evidence = document.createElement("pre");
+        evidence.textContent = JSON.stringify(item.evidence, null, 2);
+        box.appendChild(evidence);
+        const actions = document.createElement("div");
+        actions.className = "soft-actions";
+        actions.appendChild(actionButton("Preview Quarantine", async () => {
+          const preview = await fetchJson("/soft-review-preview", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({selections: [{file_id: item.file_id, reason: item.reason}]}),
+          });
+          previewId = preview.preview_id;
+          document.getElementById("plan").textContent = JSON.stringify(preview, null, 2);
+        }));
+        actions.appendChild(actionButton("Dismiss", async () => {
+          await fetchJson("/soft-review-action", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({file_id: item.file_id, reason: item.reason, action: "dismiss"}),
+          });
+          await refreshAll();
+        }, "secondary"));
+        actions.appendChild(actionButton("Exempt", async () => {
+          await fetchJson("/soft-review-action", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({file_id: item.file_id, reason: item.reason, action: "exempt"}),
+          });
+          await refreshAll();
+        }, "muted"));
+        box.appendChild(actions);
+        root.appendChild(box);
+      });
+    }
+    function actionButton(label, onclick, className) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = onclick;
+      if (className) button.className = className;
+      return button;
     }
     refreshAll();
   </script>
@@ -159,10 +238,16 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
             if parsed.path == "/candidates":
                 self._with_session(candidates_payload)
                 return
+            if parsed.path == "/soft-candidates":
+                self._with_session(lambda session: soft_candidates_payload(session, config))
+                return
             if parsed.path == "/actions":
                 query = parse_qs(parsed.query)
                 limit = int(query.get("limit", ["100"])[0])
                 self._with_session(lambda session: actions_payload(session, limit=limit))
+                return
+            if parsed.path == "/reviews":
+                self._with_session(reviews_payload)
                 return
             if parsed.path == "/stats":
                 self._with_session(lambda session: stats_payload(session, config))
@@ -192,6 +277,14 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 return
             if parsed.path == "/cleanup":
                 self._with_session(lambda session: cleanup_payload(session, config))
+                return
+            if parsed.path == "/soft-review-preview":
+                self._with_session(
+                    lambda session: create_soft_review_preview_payload(session, config, body)
+                )
+                return
+            if parsed.path == "/soft-review-action":
+                self._with_session(lambda session: create_soft_review_action_payload(session, body))
                 return
             if parsed.path == "/exemptions":
                 self._with_session(lambda session: create_exemption_payload(session, body))

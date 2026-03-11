@@ -9,11 +9,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import HsajConfig
-from .db.models import ActionLog, BlockCandidate, File, PlayHistory
+from .db.models import ActionLog, BlockCandidate, File, PlayHistory, ReviewDecision
 from .executor import apply_plan, cleanup_retention, restore_from_quarantine
 from .exemptions import add_exemption, deactivate_exemption, list_exemptions
 from .plan_runs import create_plan_run, load_plan_run, mark_plan_applied
-from .planner import Plan, build_plan
+from .planner import Plan, build_plan, build_soft_review_plan
+from .reviews import add_review_decision, latest_soft_candidate_actions, list_review_decisions
 
 
 def health_payload(
@@ -68,11 +69,13 @@ def stats_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
     expired = session.scalar(
         select(func.count()).select_from(BlockCandidate).where(BlockCandidate.status == "expired")
     )
+    reviews_count = session.scalar(select(func.count()).select_from(ReviewDecision))
     files_count = session.scalar(select(func.count()).select_from(File))
     play_history_count = session.scalar(select(func.count()).select_from(PlayHistory))
     return {
         "files": files_count or 0,
         "play_history": play_history_count or 0,
+        "reviews": reviews_count or 0,
         "candidates": {
             "planned": planned or 0,
             "quarantined": quarantined or 0,
@@ -90,6 +93,7 @@ def metrics_payload(session: Session, config: HsajConfig) -> str:
     lines = [
         f'{metric_prefix}_files_total {stats["files"]}',
         f'{metric_prefix}_play_history_total {stats["play_history"]}',
+        f'{metric_prefix}_review_decisions_total {stats["reviews"]}',
         f'{metric_prefix}_candidates_planned {candidates["planned"]}',
         f'{metric_prefix}_candidates_quarantined {candidates["quarantined"]}',
         f'{metric_prefix}_candidates_restored {candidates["restored"]}',
@@ -143,6 +147,19 @@ def apply_preview_payload(
     if preview_id:
         plan_run, _ = load_plan_run(session, preview_id)
         if plan_run is not None and not dry_run:
+            if plan_run.status == "review_preview":
+                for move in result.quarantined:
+                    if not move.reason.startswith("soft_review:"):
+                        continue
+                    add_review_decision(
+                        session,
+                        review_type="soft_candidate",
+                        file_id=move.file_id,
+                        path=str(move.destination),
+                        candidate_reason=move.reason.removeprefix("soft_review:"),
+                        action="quarantined",
+                        notes="Applied from operator review preview",
+                    )
             mark_plan_applied(session, plan_run)
             session.commit()
 
@@ -196,6 +213,25 @@ def candidates_payload(session: Session) -> list[dict[str, Any]]:
     return payload
 
 
+def soft_candidates_payload(session: Session, config: HsajConfig) -> list[dict[str, Any]]:
+    plan = build_plan(session=session, config=config)
+    latest_reviews = latest_soft_candidate_actions(session)
+    payload: list[dict[str, Any]] = []
+    for candidate in plan.soft_candidates:
+        review = latest_reviews.get((candidate.file_id, candidate.reason))
+        payload.append(
+            {
+                "file_id": candidate.file_id,
+                "source": str(candidate.source),
+                "reason": candidate.reason,
+                "evidence": candidate.evidence,
+                "review_status": review.action if review is not None else None,
+                "review_notes": review.notes if review is not None else None,
+            }
+        )
+    return payload
+
+
 def actions_payload(session: Session, *, limit: int = 100) -> list[dict[str, Any]]:
     actions = session.scalars(select(ActionLog).order_by(ActionLog.id.desc()).limit(limit)).all()
     return [
@@ -218,6 +254,97 @@ def cleanup_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
         "deleted_candidates": result.deleted_candidates,
         "expired_candidates": result.expired_candidates,
     }
+
+
+def reviews_payload(session: Session) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": decision.id,
+            "review_type": decision.review_type,
+            "file_id": decision.file_id,
+            "path": decision.path,
+            "candidate_reason": decision.candidate_reason,
+            "action": decision.action,
+            "notes": decision.notes,
+            "created_at": decision.created_at.isoformat(),
+        }
+        for decision in list_review_decisions(session)
+    ]
+
+
+def create_soft_review_preview_payload(
+    session: Session,
+    config: HsajConfig,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    raw_selections = payload.get("selections", [])
+    selections = [
+        (int(item["file_id"]), str(item["reason"]))
+        for item in raw_selections
+        if "file_id" in item and "reason" in item
+    ]
+    if not selections:
+        raise KeyError("soft_review_selections")
+
+    plan = build_soft_review_plan(session=session, config=config, selections=selections)
+    request_id = uuid4().hex
+    plan_run = create_plan_run(
+        session=session, plan=plan, request_id=request_id, status="review_preview"
+    )
+    session.commit()
+    return {
+        "preview_id": plan_run.id,
+        "request_id": request_id,
+        "plan": plan.to_dict(),
+    }
+
+
+def create_soft_review_action_payload(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    file_id = int(payload["file_id"])
+    candidate_reason = str(payload["reason"])
+    action = str(payload["action"])
+    notes = payload.get("notes")
+    file_record = session.get(File, file_id)
+    if file_record is None:
+        raise KeyError(file_id)
+
+    if action == "dismiss":
+        decision = add_review_decision(
+            session,
+            review_type="soft_candidate",
+            file_id=file_record.id,
+            path=file_record.path,
+            candidate_reason=candidate_reason,
+            action="dismissed",
+            notes=notes,
+        )
+        session.commit()
+        return {"id": decision.id, "action": decision.action}
+
+    if action == "exempt":
+        exemption = add_exemption(
+            session,
+            scope_type="file_id",
+            file_id=file_record.id,
+            reason=str(notes or f"Exempted from soft candidate review: {candidate_reason}"),
+        )
+        decision = add_review_decision(
+            session,
+            review_type="soft_candidate",
+            file_id=file_record.id,
+            path=file_record.path,
+            candidate_reason=candidate_reason,
+            action="exempted",
+            notes=notes,
+        )
+        session.commit()
+        return {
+            "id": decision.id,
+            "action": decision.action,
+            "exemption_id": exemption.id,
+        }
+
+    raise KeyError(f"unsupported_soft_review_action:{action}")
 
 
 def exemptions_payload(session: Session) -> list[dict[str, Any]]:

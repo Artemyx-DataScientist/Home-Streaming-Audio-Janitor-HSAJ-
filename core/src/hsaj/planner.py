@@ -13,6 +13,7 @@ from .atmos import AtmosMovePlan, is_atmos, plan_atmos_moves
 from .config import HsajConfig
 from .db.models import BlockCandidate, File, LibraryTrack, PlayHistory, RoonItemCache
 from .exemptions import match_file_exemption
+from .reviews import latest_soft_candidate_actions
 from .roon import RoonTrack, match_track_by_metadata
 from .timeutils import ensure_utc, utc_isoformat, utc_now
 
@@ -533,6 +534,8 @@ def _build_soft_candidates(
     if not config.policy.enable_behavior_scoring:
         return []
 
+    reviewed_actions = latest_soft_candidate_actions(session)
+
     files = session.scalars(select(File).order_by(File.id.asc())).all()
     play_signatures = {
         (
@@ -592,6 +595,10 @@ def _build_soft_candidates(
 
         duplicate_evidence = duplicate_losers.get(file_record.id)
         if duplicate_evidence is not None:
+            if _is_soft_candidate_suppressed(
+                reviewed_actions, file_record.id, "duplicate_lower_quality"
+            ):
+                continue
             soft_candidates.append(
                 SoftCandidatePlan(
                     file_id=file_record.id,
@@ -612,6 +619,8 @@ def _build_soft_candidates(
             and signature not in play_signatures
             and (now - file_record.mtime).days >= config.policy.soft_never_played_days
         ):
+            if _is_soft_candidate_suppressed(reviewed_actions, file_record.id, "never_played_old"):
+                continue
             soft_candidates.append(
                 SoftCandidatePlan(
                     file_id=file_record.id,
@@ -627,6 +636,8 @@ def _build_soft_candidates(
         ):
             age_days = (now - (file_record.mtime or now)).days
             if age_days >= config.policy.soft_inbox_days:
+                if _is_soft_candidate_suppressed(reviewed_actions, file_record.id, "stale_inbox"):
+                    continue
                 soft_candidates.append(
                     SoftCandidatePlan(
                         file_id=file_record.id,
@@ -637,6 +648,83 @@ def _build_soft_candidates(
                 )
 
     return soft_candidates
+
+
+def _is_soft_candidate_suppressed(
+    reviewed_actions: dict[tuple[int, str], object],
+    file_id: int,
+    reason: str,
+) -> bool:
+    decision = reviewed_actions.get((file_id, reason))
+    if decision is None:
+        return False
+    action = getattr(decision, "action", None)
+    return action in {"dismissed", "exempted"}
+
+
+def build_soft_review_plan(
+    session: Session,
+    config: HsajConfig,
+    *,
+    selections: Sequence[tuple[int, str]],
+    now: datetime | None = None,
+) -> Plan:
+    current_time = ensure_utc(now) or utc_now()
+    if config.paths.quarantine_dir is None:
+        raise ValueError("paths.quarantine_dir must be configured")
+
+    current_plan = build_plan(session=session, config=config, now=current_time)
+    soft_candidates_by_key = {
+        (candidate.file_id, candidate.reason): candidate
+        for candidate in current_plan.soft_candidates
+    }
+    date_folder = current_time.date().isoformat()
+    review_moves: list[QuarantineMovePlan] = []
+
+    for selection in selections:
+        soft_candidate = soft_candidates_by_key.get(selection)
+        if soft_candidate is None:
+            raise KeyError(f"soft_candidate:{selection[0]}:{selection[1]}")
+        file_record = session.get(File, soft_candidate.file_id)
+        if file_record is None or not _is_file_eligible(file_record, config):
+            raise KeyError(f"soft_candidate_file:{selection[0]}:{selection[1]}")
+
+        destination = _build_quarantine_destination(
+            Path(file_record.path),
+            quarantine_root=config.paths.quarantine_dir,
+            library_roots=config.paths.library_roots,
+            date_folder=date_folder,
+        )
+        review_moves.append(
+            QuarantineMovePlan(
+                candidate_id=0,
+                file_id=file_record.id,
+                source=Path(file_record.path),
+                destination=destination,
+                reason=f"soft_review:{soft_candidate.reason}",
+                planned_action_at=current_time,
+                object_type="soft_candidate",
+                object_id=f"file:{file_record.id}",
+                explanation={
+                    "source": "operator.review.v1",
+                    "review_type": "soft_candidate",
+                    "review_reason": soft_candidate.reason,
+                    "evidence": soft_candidate.evidence,
+                    "matched_artist": file_record.artist,
+                    "matched_album": file_record.album,
+                    "matched_title": file_record.title,
+                    "matched_track_number": file_record.track_number,
+                },
+            )
+        )
+
+    return Plan(
+        atmos_moves=[],
+        blocked_quarantine_due=review_moves,
+        blocked_quarantine_future=[],
+        low_confidence=[],
+        soft_candidates=current_plan.soft_candidates,
+    )
 
 
 def plan_from_dict(payload: dict[str, object]) -> Plan:

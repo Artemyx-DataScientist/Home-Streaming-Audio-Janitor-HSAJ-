@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -109,6 +110,134 @@ def test_server_enforces_operator_token_for_operator_routes(tmp_path: Path) -> N
         )
         assert status == 200
         assert "preview_id" in payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_supports_soft_review_flow(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    library_file = config.paths.library_roots[0] / "Artist" / "Album" / "track.mp3"
+    library_file.parent.mkdir(parents=True, exist_ok=True)
+    library_file.write_text("content")
+
+    from sqlalchemy.orm import Session
+
+    from hsaj.db import init_database
+    from hsaj.db.models import File
+    from hsaj.scanner import sync_library_graph
+
+    engine, _ = init_database(config.database)
+    with Session(engine) as session:
+        file_record = File(
+            path=str(library_file),
+            size_bytes=1,
+            format="mp3",
+            mtime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            artist="Artist",
+            album="Album",
+            title="Title",
+            track_number=1,
+            year=2024,
+            duration_seconds=300,
+        )
+        session.add(file_record)
+        session.commit()
+        sync_library_graph(session)
+        session.commit()
+        file_id = file_record.id
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        status, soft_payload = _json_request("GET", f"{base_url}/soft-candidates")
+        assert status == 200
+        assert len(soft_payload) == 1
+        assert soft_payload[0]["reason"] == "never_played_old"
+
+        status, preview_payload = _json_request(
+            "POST",
+            f"{base_url}/soft-review-preview",
+            body={"selections": [{"file_id": file_id, "reason": "never_played_old"}]},
+        )
+        assert status == 200
+        assert preview_payload["plan"]["blocked_quarantine_due"][0]["reason"] == (
+            "soft_review:never_played_old"
+        )
+
+        status, apply_payload = _json_request(
+            "POST",
+            f"{base_url}/apply",
+            body={"preview_id": preview_payload["preview_id"]},
+        )
+        assert status == 200
+        assert len(apply_payload["quarantined"]) == 1
+
+        status, reviews_payload = _json_request("GET", f"{base_url}/reviews")
+        assert status == 200
+        assert reviews_payload[0]["action"] == "quarantined"
+
+        status, actions_payload = _json_request("GET", f"{base_url}/actions")
+        assert status == 200
+        assert any(item["action"] == "quarantine_move" for item in actions_payload)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_can_dismiss_soft_candidate(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    library_file = config.paths.library_roots[0] / "Artist" / "Album" / "track.mp3"
+    library_file.parent.mkdir(parents=True, exist_ok=True)
+    library_file.write_text("content")
+
+    from sqlalchemy.orm import Session
+
+    from hsaj.db import init_database
+    from hsaj.db.models import File
+    from hsaj.scanner import sync_library_graph
+
+    engine, _ = init_database(config.database)
+    with Session(engine) as session:
+        file_record = File(
+            path=str(library_file),
+            size_bytes=1,
+            format="mp3",
+            mtime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            artist="Artist",
+            album="Album",
+            title="Title",
+            track_number=1,
+            year=2024,
+            duration_seconds=300,
+        )
+        session.add(file_record)
+        session.commit()
+        sync_library_graph(session)
+        session.commit()
+        file_id = file_record.id
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        status, _ = _json_request(
+            "POST",
+            f"{base_url}/soft-review-action",
+            body={"file_id": file_id, "reason": "never_played_old", "action": "dismiss"},
+        )
+        assert status == 200
+
+        status, soft_payload = _json_request("GET", f"{base_url}/soft-candidates")
+        assert status == 200
+        assert soft_payload == []
     finally:
         server.shutdown()
         server.server_close()

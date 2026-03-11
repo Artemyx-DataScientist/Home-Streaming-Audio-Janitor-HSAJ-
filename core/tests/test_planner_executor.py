@@ -12,7 +12,8 @@ from hsaj.db import init_database
 from hsaj.db.models import ActionLog, BlockCandidate, File, LibraryTrack, RoonItemCache
 from hsaj.executor import apply_plan, cleanup_retention, restore_from_quarantine
 from hsaj.exemptions import add_exemption
-from hsaj.planner import Plan, build_plan
+from hsaj.planner import Plan, build_plan, build_soft_review_plan
+from hsaj.reviews import add_review_decision
 from hsaj.roon import RoonTrack
 from hsaj.scanner import sync_library_graph
 
@@ -531,3 +532,71 @@ def test_cleanup_retention_marks_expired_without_auto_delete(tmp_path: Path) -> 
         assert result.expired_candidates == [candidate.id]
         assert refreshed_candidate is not None
         assert refreshed_candidate.status == "expired"
+
+
+def test_soft_candidate_dismissal_suppresses_future_plans(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        file_record = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track.mp3",
+            artist="Artist",
+            album="Album",
+            title="Title",
+            track_number=1,
+        )
+        file_record.mtime = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        session.commit()
+        first_plan = _build_plan(session, config)
+        assert len(first_plan.soft_candidates) == 1
+        assert first_plan.soft_candidates[0].reason == "never_played_old"
+
+        add_review_decision(
+            session,
+            review_type="soft_candidate",
+            file_id=file_record.id,
+            path=file_record.path,
+            candidate_reason="never_played_old",
+            action="dismissed",
+            notes="not actionable",
+        )
+        session.commit()
+
+        second_plan = _build_plan(session, config)
+
+    assert second_plan.soft_candidates == []
+
+
+def test_build_soft_review_plan_creates_manual_quarantine_move(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        file_record = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track.mp3",
+            artist="Artist",
+            album="Album",
+            title="Title",
+            track_number=1,
+        )
+        file_record.mtime = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        session.commit()
+
+        review_plan = build_soft_review_plan(
+            session,
+            config,
+            selections=[(file_record.id, "never_played_old")],
+            now=datetime(2024, 1, 10, tzinfo=timezone.utc),
+        )
+
+    assert len(review_plan.blocked_quarantine_due) == 1
+    move = review_plan.blocked_quarantine_due[0]
+    assert move.candidate_id == 0
+    assert move.reason == "soft_review:never_played_old"
+    assert move.object_type == "soft_candidate"
+    assert move.destination == (
+        config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.mp3"
+    )
