@@ -13,7 +13,7 @@ def test_db_init_and_status(tmp_path: Path) -> None:
     engine, version = init_database(db_config)
 
     assert engine is not None
-    assert version == "0009_review_decisions"
+    assert version == "0010_bridge_sync_status"
 
     status = database_status(db_config)
-    assert status == "0009_review_decisions"
+    assert status == "0010_bridge_sync_status"

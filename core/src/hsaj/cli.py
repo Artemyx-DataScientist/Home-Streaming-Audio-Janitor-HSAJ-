@@ -9,7 +9,13 @@ import typer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .blocking import fetch_blocked_from_bridge, sync_blocked_objects
+from .blocking import (
+    BlockedSnapshot,
+    fetch_blocked_snapshot_from_bridge,
+    record_blocked_sync_failure,
+    record_blocked_sync_success,
+    sync_blocked_objects,
+)
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
 from .db.models import BlockCandidate, PlayHistory, RoonItemCache
@@ -30,6 +36,9 @@ exempt_app = typer.Typer(help="Manual exemptions")
 app.add_typer(db_app, name="db")
 app.add_typer(roon_app, name="roon")
 app.add_typer(exempt_app, name="exempt")
+
+# Backward-compatible symbol for tests and monkeypatching hooks.
+fetch_blocked_from_bridge = fetch_blocked_snapshot_from_bridge
 
 
 @dataclass(slots=True)
@@ -375,21 +384,38 @@ def roon_sync_command(
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
 
+    engine, _ = init_database(loaded.config.database)
     try:
-        blocked = fetch_blocked_from_bridge(base_url=bridge_url or loaded.config.bridge.http_url)
+        snapshot_or_items = fetch_blocked_from_bridge(
+            base_url=bridge_url or loaded.config.bridge.http_url
+        )
     except BridgeClientError as exc:
+        with Session(engine) as session:
+            record_blocked_sync_failure(session, error=str(exc))
+            session.commit()
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
+    if isinstance(snapshot_or_items, BlockedSnapshot):
+        snapshot = snapshot_or_items
+    else:
+        items = list(snapshot_or_items)
+        snapshot = BlockedSnapshot(
+            items=items,
+            contract_version=None,
+            generated_at=None,
+            source_mode=None,
+            item_count=len(items),
+        )
 
-    engine, _ = init_database(loaded.config.database)
     cache_result = TrackCacheWarmupResult()
     resolved_grace_days = (
         loaded.config.policy.block_grace_days if grace_days is None else grace_days
     )
     with Session(engine) as session:
+        record_blocked_sync_success(session, snapshot=snapshot)
         result = sync_blocked_objects(
             session=session,
-            blocked_items=blocked,
+            blocked_items=snapshot.items,
             grace_period_days=resolved_grace_days,
             seen_at=utc_now(),
         )
@@ -403,9 +429,11 @@ def roon_sync_command(
 
     typer.echo(
         "Blocked-object sync completed. "
-        f"Raw blocks: {len(blocked)}; raw created: {result.raw_created}; "
+        f"Raw blocks: {len(snapshot.items)}; raw created: {result.raw_created}; "
         f"raw updated: {result.raw_updated}; candidates created: {result.candidates_created}; "
-        f"candidates restored: {result.candidates_restored}"
+        f"candidates restored: {result.candidates_restored}; "
+        f"contract_version: {snapshot.contract_version or 'legacy'}; "
+        f"source_mode: {snapshot.source_mode or 'unknown'}"
     )
     if cache_tracks:
         typer.echo(

@@ -55,7 +55,8 @@ Operational bridge probes:
 - `GET /metrics`
 
 Observed transport events are sourced from Roon transport subscriptions. Demo tracks and demo blocks are no longer used.
-`/blocked` accepts `artist`, `album`, and `track` objects and preserves metadata like `artist`, `album`, `title`, `track_number`, and `duration_ms` for the core inheritance flow.
+`/blocked` returns a versioned snapshot envelope with `contract_version`, `generated_at`, `source`, `item_count`, `object_types`, and `items`.
+Blocked `items` accept `artist`, `album`, and `track` objects and preserve metadata like `artist`, `album`, `title`, `track_number`, and `duration_ms` for the core inheritance flow.
 
 ## Security defaults
 
@@ -118,6 +119,8 @@ Common commands:
 
 If `security.operator_token` or `HSAJ_OPERATOR_TOKEN` is set, operator routes require
 `X-HSAJ-Operator-Token`. Health, live, ready, and metrics remain available for probes.
+
+Core health and metrics also expose the last persisted blocked-sync status, including whether the most recent bridge fetch succeeded, which blocked contract version was seen, and how many blocked objects were in the last snapshot.
 
 Soft candidates are advisory only. Operators can:
 - dismiss them, which suppresses the same advisory signal for that file

@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-import { describeBlockedSource, loadBlockedObjects, normalizeBlockedObject } from "./blocked.js";
+import {
+  BLOCKED_CONTRACT_VERSION,
+  buildBlockedSnapshot,
+  describeBlockedSource,
+  loadBlockedObjects,
+  normalizeBlockedObject,
+} from "./blocked.js";
 
 test("normalizeBlockedObject preserves metadata and builds fallback ids", () => {
   const normalized = normalizeBlockedObject({
@@ -66,4 +72,23 @@ test("describeBlockedSource reports configured modes", () => {
     configured: false,
     mode: "unconfigured",
   });
+});
+
+test("buildBlockedSnapshot returns versioned envelope with metadata", () => {
+  const snapshot = buildBlockedSnapshot(
+    {
+      BRIDGE_BLOCKED_JSON: JSON.stringify([
+        { type: "artist", id: "artist-1", artist: "Artist" },
+        { type: "album", artist: "Artist", album: "Album" },
+      ]),
+    },
+    new Date("2024-01-02T03:04:05.000Z"),
+  );
+
+  assert.equal(snapshot.contract_version, BLOCKED_CONTRACT_VERSION);
+  assert.equal(snapshot.generated_at, "2024-01-02T03:04:05.000Z");
+  assert.equal(snapshot.item_count, 2);
+  assert.deepEqual(snapshot.object_types, ["album", "artist"]);
+  assert.equal(snapshot.source.mode, "inline_json");
+  assert.equal(snapshot.items[0].type, "artist");
 });

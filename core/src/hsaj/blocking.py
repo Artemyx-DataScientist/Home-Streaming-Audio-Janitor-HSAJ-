@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .bridge_auth import build_bridge_headers
-from .db.models import BlockCandidate, RoonBlockRaw
+from .db.models import BlockCandidate, BridgeSyncStatus, RoonBlockRaw
 from .roon import DEFAULT_BRIDGE_HTTP_URL, BridgeClientError
 from .timeutils import ensure_utc, utc_now
 
@@ -78,6 +78,17 @@ class SyncResult:
     raw_updated: int
     candidates_created: int
     candidates_restored: int
+
+
+@dataclass(frozen=True)
+class BlockedSnapshot:
+    """Blocked snapshot envelope returned by the bridge contract."""
+
+    items: list[BlockedObject]
+    contract_version: str | None
+    generated_at: datetime | None
+    source_mode: str | None
+    item_count: int
 
 
 def _reason_for(blocked: BlockedObject) -> str:
@@ -259,10 +270,10 @@ def sync_blocked_objects(
     )
 
 
-def fetch_blocked_from_bridge(
+def fetch_blocked_snapshot_from_bridge(
     base_url: str | None = None,
     timeout: float = 5.0,
-) -> list[BlockedObject]:
+) -> BlockedSnapshot:
     """Fetch blocked objects from the bridge."""
 
     bridge_base = base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
@@ -284,10 +295,117 @@ def fetch_blocked_from_bridge(
     except json.JSONDecodeError as exc:  # pragma: no cover - unexpected response
         raise BridgeClientError(f"Invalid bridge JSON: {exc}") from exc
 
-    if not isinstance(parsed, list):
-        raise BridgeClientError("Expected a JSON array from /blocked")
+    if isinstance(parsed, list):
+        items = [BlockedObject.from_dict(item) for item in parsed]
+        return BlockedSnapshot(
+            items=items,
+            contract_version=None,
+            generated_at=None,
+            source_mode=None,
+            item_count=len(items),
+        )
 
-    return [BlockedObject.from_dict(item) for item in parsed]
+    if not isinstance(parsed, dict):
+        raise BridgeClientError("Expected a JSON array or snapshot object from /blocked")
+
+    items_payload = parsed.get("items")
+    if not isinstance(items_payload, list):
+        raise BridgeClientError("Blocked snapshot must contain an items array")
+
+    generated_at_raw = parsed.get("generated_at")
+    generated_at = None
+    if generated_at_raw:
+        try:
+            generated_at = ensure_utc(datetime.fromisoformat(str(generated_at_raw)))
+        except ValueError as exc:
+            raise BridgeClientError(
+                f"Invalid blocked snapshot generated_at: {generated_at_raw}"
+            ) from exc
+
+    source_payload = parsed.get("source")
+    source_mode = None
+    if isinstance(source_payload, dict):
+        mode = source_payload.get("mode")
+        source_mode = _normalize_string(mode)
+
+    items = [BlockedObject.from_dict(item) for item in items_payload]
+    item_count_raw = parsed.get("item_count")
+    item_count = len(items)
+    if item_count_raw is not None:
+        item_count = _parse_optional_int(item_count_raw) or 0
+
+    return BlockedSnapshot(
+        items=items,
+        contract_version=_normalize_string(parsed.get("contract_version")),
+        generated_at=generated_at,
+        source_mode=source_mode,
+        item_count=item_count,
+    )
+
+
+def fetch_blocked_from_bridge(
+    base_url: str | None = None,
+    timeout: float = 5.0,
+) -> list[BlockedObject]:
+    """Compatibility helper that returns only blocked items."""
+
+    return fetch_blocked_snapshot_from_bridge(base_url=base_url, timeout=timeout).items
+
+
+def record_blocked_sync_success(
+    session: Session,
+    *,
+    snapshot: BlockedSnapshot,
+    attempted_at: datetime | None = None,
+) -> BridgeSyncStatus:
+    return _upsert_bridge_sync_status(
+        session=session,
+        status="ok",
+        attempted_at=attempted_at or utc_now(),
+        snapshot=snapshot,
+        error=None,
+    )
+
+
+def record_blocked_sync_failure(
+    session: Session,
+    *,
+    error: str,
+    attempted_at: datetime | None = None,
+) -> BridgeSyncStatus:
+    return _upsert_bridge_sync_status(
+        session=session,
+        status="error",
+        attempted_at=attempted_at or utc_now(),
+        snapshot=None,
+        error=error,
+    )
+
+
+def _upsert_bridge_sync_status(
+    session: Session,
+    *,
+    status: str,
+    attempted_at: datetime,
+    snapshot: BlockedSnapshot | None,
+    error: str | None,
+) -> BridgeSyncStatus:
+    normalized_attempt = _normalize_datetime(attempted_at)
+    record = session.get(BridgeSyncStatus, "blocked")
+    if record is None:
+        record = BridgeSyncStatus(sync_name="blocked", status=status)
+        session.add(record)
+
+    record.status = status
+    record.last_attempt_at = normalized_attempt
+    record.last_error = error
+    if snapshot is not None:
+        record.contract_version = snapshot.contract_version
+        record.source_mode = snapshot.source_mode
+        record.item_count = snapshot.item_count
+        record.snapshot_generated_at = snapshot.generated_at
+        record.last_success_at = normalized_attempt
+    return record
 
 
 def _normalize_string(value: Any) -> str | None:

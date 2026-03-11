@@ -342,3 +342,25 @@ class ReviewDecision(Base):
     created_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), server_default=func.now(), nullable=False
     )
+
+
+class BridgeSyncStatus(Base):
+    """Latest known status for bridge sync jobs such as blocked-object refresh."""
+
+    __tablename__ = "bridge_sync_status"
+
+    sync_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="never_run")
+    contract_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_mode: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    snapshot_generated_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

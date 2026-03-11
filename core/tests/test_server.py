@@ -8,6 +8,9 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from sqlalchemy.orm import Session
+
+from hsaj.blocking import BlockedObject, BlockedSnapshot, record_blocked_sync_success
 from hsaj.config import (
     BridgeConfig,
     DatabaseConfig,
@@ -16,6 +19,9 @@ from hsaj.config import (
     PathsConfig,
     SecurityConfig,
 )
+from hsaj.db import init_database
+from hsaj.db.models import File
+from hsaj.scanner import sync_library_graph
 from hsaj.server import serve_operator_api
 
 
@@ -116,17 +122,50 @@ def test_server_enforces_operator_token_for_operator_routes(tmp_path: Path) -> N
         thread.join(timeout=5)
 
 
+def test_server_health_exposes_blocked_sync_status(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    engine, _ = init_database(config.database)
+    with Session(engine) as session:
+        record_blocked_sync_success(
+            session,
+            snapshot=BlockedSnapshot(
+                items=[BlockedObject(object_type="artist", object_id="artist-1", artist="Artist")],
+                contract_version="v2",
+                generated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                source_mode="inline_json",
+                item_count=1,
+            ),
+            attempted_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        )
+        session.commit()
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        status, health_payload = _json_request("GET", f"{base_url}/health")
+        assert status == 200
+        assert health_payload["blocked_sync"]["status"] == "ok"
+        assert health_payload["blocked_sync"]["contract_version"] == "v2"
+
+        status, metrics_payload = _text_request(f"{base_url}/metrics")
+        assert status == 200
+        assert "hsaj_core_blocked_sync_ok 1" in metrics_payload
+        assert "hsaj_core_blocked_sync_item_count 1" in metrics_payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_server_supports_soft_review_flow(tmp_path: Path) -> None:
     config = _config(tmp_path)
     library_file = config.paths.library_roots[0] / "Artist" / "Album" / "track.mp3"
     library_file.parent.mkdir(parents=True, exist_ok=True)
     library_file.write_text("content")
-
-    from sqlalchemy.orm import Session
-
-    from hsaj.db import init_database
-    from hsaj.db.models import File
-    from hsaj.scanner import sync_library_graph
 
     engine, _ = init_database(config.database)
     with Session(engine) as session:
@@ -195,12 +234,6 @@ def test_server_can_dismiss_soft_candidate(tmp_path: Path) -> None:
     library_file = config.paths.library_roots[0] / "Artist" / "Album" / "track.mp3"
     library_file.parent.mkdir(parents=True, exist_ok=True)
     library_file.write_text("content")
-
-    from sqlalchemy.orm import Session
-
-    from hsaj.db import init_database
-    from hsaj.db.models import File
-    from hsaj.scanner import sync_library_graph
 
     engine, _ = init_database(config.database)
     with Session(engine) as session:

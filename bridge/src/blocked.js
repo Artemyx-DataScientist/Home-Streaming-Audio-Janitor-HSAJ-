@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 const SUPPORTED_TYPES = new Set(["artist", "album", "track"]);
+export const BLOCKED_CONTRACT_VERSION = "v2";
 
 const normalizeString = (value) => {
   if (value === undefined || value === null) {
@@ -162,7 +163,24 @@ export const describeBlockedSource = (env = process.env) => {
 };
 
 export const createBlockedProvider = (env = process.env) => {
-  const provider = () => loadBlockedObjects(env);
+  const provider = () => buildBlockedSnapshot(env);
   provider.describe = () => describeBlockedSource(env);
   return provider;
+};
+
+export const buildBlockedSnapshot = (env = process.env, now = new Date()) => {
+  const items = loadBlockedObjects(env);
+  if (items === null) {
+    return null;
+  }
+
+  const objectTypes = Array.from(new Set(items.map((item) => item.type))).sort();
+  return {
+    contract_version: BLOCKED_CONTRACT_VERSION,
+    generated_at: now.toISOString(),
+    source: describeBlockedSource(env),
+    item_count: items.length,
+    object_types: objectTypes,
+    items,
+  };
 };

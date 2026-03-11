@@ -1,12 +1,22 @@
 ﻿from __future__ import annotations
 
+import json
+import threading
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from hsaj.blocking import BlockedObject, sync_blocked_objects, upsert_raw_block
-from hsaj.db.models import Base, BlockCandidate, RoonBlockRaw
+from hsaj.blocking import (
+    BlockedObject,
+    fetch_blocked_snapshot_from_bridge,
+    record_blocked_sync_failure,
+    record_blocked_sync_success,
+    sync_blocked_objects,
+    upsert_raw_block,
+)
+from hsaj.db.models import Base, BlockCandidate, BridgeSyncStatus, RoonBlockRaw
 
 
 def _session() -> Session:
@@ -118,3 +128,86 @@ def test_sync_blocked_marks_restored_when_missing() -> None:
         assert candidate.restored_at == later
         assert candidate.planned_action_at is None
         assert candidate.last_seen_at == later
+
+
+def test_record_blocked_sync_status_tracks_success_and_failure() -> None:
+    seen_at = datetime(2024, 5, 1, tzinfo=timezone.utc)
+    snapshot = fetch_blocked_snapshot_from_bridge_from_payload(
+        {
+            "contract_version": "v2",
+            "generated_at": "2024-05-01T00:00:00+00:00",
+            "source": {"configured": True, "mode": "file"},
+            "item_count": 1,
+            "items": [{"type": "artist", "id": "artist-1", "artist": "Artist"}],
+        }
+    )
+
+    with _session() as session:
+        record_blocked_sync_success(session, snapshot=snapshot, attempted_at=seen_at)
+        session.commit()
+
+        status = session.get(BridgeSyncStatus, "blocked")
+        assert status is not None
+        assert status.status == "ok"
+        assert status.contract_version == "v2"
+        assert status.source_mode == "file"
+        assert status.item_count == 1
+        assert status.last_success_at == seen_at
+
+        failure_at = seen_at + timedelta(hours=1)
+        record_blocked_sync_failure(session, error="bridge unavailable", attempted_at=failure_at)
+        session.commit()
+
+        status = session.get(BridgeSyncStatus, "blocked")
+        assert status is not None
+        assert status.status == "error"
+        assert status.last_error == "bridge unavailable"
+        assert status.last_success_at == seen_at
+        assert status.last_attempt_at == failure_at
+
+
+def test_fetch_blocked_snapshot_parses_envelope() -> None:
+    snapshot = fetch_blocked_snapshot_from_bridge_from_payload(
+        {
+            "contract_version": "v2",
+            "generated_at": "2024-05-01T00:00:00+00:00",
+            "source": {"configured": True, "mode": "inline_json"},
+            "item_count": 2,
+            "items": [
+                {"type": "artist", "id": "artist-1", "artist": "Artist"},
+                {"type": "album", "id": "album-1", "artist": "Artist", "album": "Album"},
+            ],
+        }
+    )
+
+    assert snapshot.contract_version == "v2"
+    assert snapshot.source_mode == "inline_json"
+    assert snapshot.item_count == 2
+    assert len(snapshot.items) == 2
+    assert snapshot.items[1].object_type == "album"
+
+
+def fetch_blocked_snapshot_from_bridge_from_payload(payload: dict) -> object:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        return fetch_blocked_snapshot_from_bridge(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

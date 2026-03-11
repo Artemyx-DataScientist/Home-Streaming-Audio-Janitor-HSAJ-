@@ -84,11 +84,39 @@ const buildObservedTrackId = ({ zoneId, title, artist, album, durationMs, trackn
   return `observed:${Buffer.from(identity).toString("base64url")}`;
 };
 
+const buildBlockedSummary = (blockedProvider) => {
+  try {
+    const snapshot = blockedProvider();
+    if (snapshot === null) {
+      return {
+        configured: false,
+        mode: "unconfigured",
+        contract_version: null,
+        item_count: 0,
+        generated_at: null,
+      };
+    }
+    return {
+      ...(snapshot.source ?? { configured: true, mode: "unknown" }),
+      contract_version: snapshot.contract_version ?? null,
+      item_count: snapshot.item_count ?? snapshot.items?.length ?? 0,
+      generated_at: snapshot.generated_at ?? null,
+      object_types: snapshot.object_types ?? [],
+    };
+  } catch (error) {
+    return {
+      ...(blockedProvider.describe ? blockedProvider.describe() : { configured: true, mode: "unknown" }),
+      status: "error",
+      error: error.message,
+    };
+  }
+};
+
 const buildHealthResponse = (roonStatus, blockedProvider) => ({
   status: "ok",
   roon: roonStatus,
   contract_version: CONTRACT_VERSION,
-  blocked_source: blockedProvider.describe ? blockedProvider.describe() : { configured: false, mode: "unknown" },
+  blocked_source: buildBlockedSummary(blockedProvider),
   security: {
     loopback_only: isLoopbackHost(DEFAULT_HOST),
     auth_required: Boolean(SHARED_SECRET),
@@ -99,11 +127,11 @@ const buildReadyResponse = (roonStatus, blockedProvider) => ({
   status: "ready",
   roon: roonStatus,
   contract_version: CONTRACT_VERSION,
-  blocked_source: blockedProvider.describe ? blockedProvider.describe() : { configured: false, mode: "unknown" },
+  blocked_source: buildBlockedSummary(blockedProvider),
 });
 
 const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
-  const blockedSource = blockedProvider.describe ? blockedProvider.describe() : { configured: false };
+  const blockedSource = buildBlockedSummary(blockedProvider);
   return [
     `hsaj_bridge_transport_events_total ${metrics.transportEventsTotal}`,
     `hsaj_bridge_track_start_total ${metrics.trackStartsTotal}`,
@@ -111,6 +139,7 @@ const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
     `hsaj_bridge_ws_clients ${metrics.wsClients}`,
     `hsaj_bridge_track_cache_entries ${metrics.trackCacheEntries}`,
     `hsaj_bridge_blocked_source_configured ${blockedSource.configured ? 1 : 0}`,
+    `hsaj_bridge_blocked_items ${blockedSource.item_count ?? 0}`,
     `hsaj_bridge_auth_required ${SHARED_SECRET ? 1 : 0}`,
     `hsaj_bridge_roon_connected ${roonStatus === "connected" ? 1 : 0}`,
   ].join("\n") + "\n";

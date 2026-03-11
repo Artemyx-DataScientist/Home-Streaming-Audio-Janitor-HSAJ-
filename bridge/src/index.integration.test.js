@@ -48,11 +48,19 @@ test("bridge exposes live, ready, health, and metrics endpoints", async () => {
     const healthPayload = await healthResponse.json();
     assert.equal(healthPayload.contract_version, "v1");
     assert.equal(healthPayload.blocked_source.configured, true);
+    assert.equal(healthPayload.blocked_source.contract_version, "v2");
 
     const metricsResponse = await waitForHttp(`http://127.0.0.1:${port}/metrics`);
     assert.equal(metricsResponse.status, 200);
     const metricsPayload = await metricsResponse.text();
     assert.match(metricsPayload, /hsaj_bridge_transport_events_total/);
+    assert.match(metricsPayload, /hsaj_bridge_blocked_items/);
+
+    const blockedResponse = await waitForHttp(`http://127.0.0.1:${port}/blocked`);
+    assert.equal(blockedResponse.status, 200);
+    const blockedPayload = await blockedResponse.json();
+    assert.equal(blockedPayload.contract_version, "v2");
+    assert.ok(Array.isArray(blockedPayload.items));
   } finally {
     child.kill("SIGTERM");
   }

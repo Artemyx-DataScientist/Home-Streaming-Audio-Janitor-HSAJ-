@@ -9,7 +9,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import HsajConfig
-from .db.models import ActionLog, BlockCandidate, File, PlayHistory, ReviewDecision
+from .db.models import (
+    ActionLog,
+    BlockCandidate,
+    BridgeSyncStatus,
+    File,
+    PlayHistory,
+    ReviewDecision,
+)
 from .executor import apply_plan, cleanup_retention, restore_from_quarantine
 from .exemptions import add_exemption, deactivate_exemption, list_exemptions
 from .plan_runs import create_plan_run, load_plan_run, mark_plan_applied
@@ -23,12 +30,38 @@ def health_payload(
     *,
     schema_version: str | None,
 ) -> dict[str, Any]:
-    del session
+    blocked_sync = session.get(BridgeSyncStatus, "blocked")
     return {
         "status": "ok",
         "schema_version": schema_version,
         "bridge_contract_version": config.bridge.contract_version,
         "auth_required": bool(config.security.operator_token),
+        "blocked_sync": (
+            {
+                "status": blocked_sync.status,
+                "contract_version": blocked_sync.contract_version,
+                "source_mode": blocked_sync.source_mode,
+                "item_count": blocked_sync.item_count,
+                "snapshot_generated_at": (
+                    blocked_sync.snapshot_generated_at.isoformat()
+                    if blocked_sync.snapshot_generated_at
+                    else None
+                ),
+                "last_attempt_at": (
+                    blocked_sync.last_attempt_at.isoformat()
+                    if blocked_sync.last_attempt_at
+                    else None
+                ),
+                "last_success_at": (
+                    blocked_sync.last_success_at.isoformat()
+                    if blocked_sync.last_success_at
+                    else None
+                ),
+                "last_error": blocked_sync.last_error,
+            }
+            if blocked_sync is not None
+            else None
+        ),
         "operator": {
             "host": config.security.operator_host,
             "port": config.security.operator_port,
@@ -70,12 +103,17 @@ def stats_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
         select(func.count()).select_from(BlockCandidate).where(BlockCandidate.status == "expired")
     )
     reviews_count = session.scalar(select(func.count()).select_from(ReviewDecision))
+    blocked_sync = session.get(BridgeSyncStatus, "blocked")
     files_count = session.scalar(select(func.count()).select_from(File))
     play_history_count = session.scalar(select(func.count()).select_from(PlayHistory))
     return {
         "files": files_count or 0,
         "play_history": play_history_count or 0,
         "reviews": reviews_count or 0,
+        "blocked_sync": {
+            "status": blocked_sync.status if blocked_sync is not None else "never_run",
+            "item_count": blocked_sync.item_count if blocked_sync is not None else 0,
+        },
         "candidates": {
             "planned": planned or 0,
             "quarantined": quarantined or 0,
@@ -94,12 +132,14 @@ def metrics_payload(session: Session, config: HsajConfig) -> str:
         f'{metric_prefix}_files_total {stats["files"]}',
         f'{metric_prefix}_play_history_total {stats["play_history"]}',
         f'{metric_prefix}_review_decisions_total {stats["reviews"]}',
+        f'{metric_prefix}_blocked_sync_item_count {stats["blocked_sync"]["item_count"]}',
         f'{metric_prefix}_candidates_planned {candidates["planned"]}',
         f'{metric_prefix}_candidates_quarantined {candidates["quarantined"]}',
         f'{metric_prefix}_candidates_restored {candidates["restored"]}',
         f'{metric_prefix}_candidates_deleted {candidates["deleted"]}',
         f'{metric_prefix}_candidates_expired {candidates["expired"]}',
         f"{metric_prefix}_operator_auth_required {1 if config.security.operator_token else 0}",
+        f"{metric_prefix}_blocked_sync_ok {1 if stats['blocked_sync']['status'] == 'ok' else 0}",
     ]
     return "\n".join(lines) + "\n"
 

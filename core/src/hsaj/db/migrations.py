@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from .models import (
     Base,
     BlockCandidate,
+    BridgeSyncStatus,
     Exemption,
     LibraryAlbum,
     LibraryArtist,
@@ -208,6 +209,10 @@ def _migration_v9(conn: Connection) -> None:
     ReviewDecision.__table__.create(bind=conn, checkfirst=True)
 
 
+def _migration_v10(conn: Connection) -> None:
+    BridgeSyncStatus.__table__.create(bind=conn, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -253,6 +258,11 @@ MIGRATIONS: list[Migration] = [
         version="0009_review_decisions",
         description="Add persistent operator review decisions for advisory candidates",
         upgrade=_migration_v9,
+    ),
+    Migration(
+        version="0010_bridge_sync_status",
+        description="Add persisted bridge sync freshness and status tracking",
+        upgrade=_migration_v10,
     ),
 ]
 
