@@ -65,9 +65,7 @@ def test_warm_track_cache_warms_cache_and_survives_partial_failures(monkeypatch)
         assert candidate_ids == ["track-1", "track-2"]
 
 
-def test_roon_sync_uses_policy_grace_days_from_config(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_roon_sync_uses_policy_grace_days_from_config(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "hsaj.yaml"
     db_path = tmp_path / "hsaj.db"
     config_path.write_text(

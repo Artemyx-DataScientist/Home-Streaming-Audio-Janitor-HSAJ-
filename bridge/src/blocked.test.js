@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-import { loadBlockedObjects, normalizeBlockedObject } from "./blocked.js";
+import { describeBlockedSource, loadBlockedObjects, normalizeBlockedObject } from "./blocked.js";
 
 test("normalizeBlockedObject preserves metadata and builds fallback ids", () => {
   const normalized = normalizeBlockedObject({
@@ -50,4 +50,20 @@ test("loadBlockedObjects reads and deduplicates blocked entries from file", () =
   assert.equal(blocked[1].title, "Song");
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("describeBlockedSource reports configured modes", () => {
+  assert.deepEqual(describeBlockedSource({ BRIDGE_BLOCKED_JSON: "[]" }), {
+    configured: true,
+    mode: "inline_json",
+  });
+  assert.deepEqual(describeBlockedSource({ BRIDGE_BLOCKED_FILE: "/tmp/blocked.json" }), {
+    configured: true,
+    mode: "file",
+    file_path: "/tmp/blocked.json",
+  });
+  assert.deepEqual(describeBlockedSource({}), {
+    configured: false,
+    mode: "unconfigured",
+  });
 });

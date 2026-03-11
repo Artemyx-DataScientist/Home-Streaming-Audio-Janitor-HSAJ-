@@ -11,12 +11,13 @@ from mutagen import File
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import HeaderNotFoundError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from .atmos import is_atmos
 from .db.models import File as FileModel
+from .db.models import LibraryAlbum, LibraryArtist, LibraryTrack
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,7 @@ def _extract_metadata(
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Could not read duration for %s: %s", path, exc)
 
-    detection = atmos_detection_fn or (
-        lambda target: is_atmos(target, ffprobe_path=ffprobe_path)
-    )
+    detection = atmos_detection_fn or (lambda target: is_atmos(target, ffprobe_path=ffprobe_path))
 
     return FileMetadata(
         path=path.resolve(),
@@ -135,9 +134,7 @@ def _normalize_extensions(extensions: Sequence[str] | None) -> set[str] | None:
     if extensions is None:
         return None
     normalized = {
-        f".{item.strip().lstrip('.').lower()}"
-        for item in extensions
-        if str(item).strip()
+        f".{item.strip().lstrip('.').lower()}" for item in extensions if str(item).strip()
     }
     return normalized or None
 
@@ -175,9 +172,7 @@ def _iter_files_filtered(
         for dirpath, dirnames, filenames in os.walk(root):
             current_dir = Path(dirpath)
             dirnames[:] = [
-                name
-                for name in dirnames
-                if not _should_skip_dir(current_dir / name, excluded_dirs)
+                name for name in dirnames if not _should_skip_dir(current_dir / name, excluded_dirs)
             ]
             for filename in filenames:
                 path = current_dir / filename
@@ -229,14 +224,76 @@ def scan_library(
             if pending >= batch_size:
                 session.commit()
                 pending = 0
+        sync_library_graph(session)
         session.commit()
 
     return summary
 
 
-def _upsert_file(
-    session: Session, metadata: FileMetadata, summary: ScanSummary
-) -> ScanSummary:
+def sync_library_graph(session: Session) -> None:
+    files = session.scalars(select(FileModel).order_by(FileModel.id.asc())).all()
+
+    session.execute(delete(LibraryTrack))
+    session.execute(delete(LibraryAlbum))
+    session.execute(delete(LibraryArtist))
+    session.flush()
+
+    artist_ids: dict[str, int] = {}
+    album_ids: dict[tuple[str, str], int] = {}
+
+    for file_record in files:
+        artist_name = _clean_text(file_record.artist)
+        album_title = _clean_text(file_record.album)
+        title = _clean_text(file_record.title)
+        normalized_artist = _normalize_entity_name(artist_name) or ""
+        normalized_album = _normalize_entity_name(album_title) or ""
+        normalized_title = _normalize_entity_name(title) or ""
+
+        artist_id: int | None = None
+        if artist_name is not None:
+            artist_id = artist_ids.get(normalized_artist)
+            if artist_id is None:
+                artist = LibraryArtist(name=artist_name, normalized_name=normalized_artist)
+                session.add(artist)
+                session.flush()
+                artist_id = artist.id
+                artist_ids[normalized_artist] = artist_id
+
+        album_id: int | None = None
+        if album_title is not None:
+            album_key = (normalized_artist, normalized_album)
+            album_id = album_ids.get(album_key)
+            if album_id is None:
+                album = LibraryAlbum(
+                    artist_id=artist_id,
+                    artist_name=artist_name,
+                    normalized_artist_name=normalized_artist,
+                    title=album_title,
+                    normalized_title=normalized_album,
+                )
+                session.add(album)
+                session.flush()
+                album_id = album.id
+                album_ids[album_key] = album_id
+
+        session.add(
+            LibraryTrack(
+                file_id=file_record.id,
+                artist_id=artist_id,
+                album_id=album_id,
+                artist_name=artist_name,
+                normalized_artist_name=normalized_artist,
+                album_title=album_title,
+                normalized_album_title=normalized_album,
+                title=title,
+                normalized_title=normalized_title,
+                track_number=file_record.track_number,
+                duration_seconds=file_record.duration_seconds,
+            )
+        )
+
+
+def _upsert_file(session: Session, metadata: FileMetadata, summary: ScanSummary) -> ScanSummary:
     existing = session.execute(
         select(FileModel).where(FileModel.path == str(metadata.path))
     ).scalar_one_or_none()
@@ -269,9 +326,7 @@ def _upsert_file(
     updated |= _assign_if_changed(existing, "title", metadata.title)
     updated |= _assign_if_changed(existing, "track_number", metadata.track_number)
     updated |= _assign_if_changed(existing, "year", metadata.year)
-    updated |= _assign_if_changed(
-        existing, "duration_seconds", metadata.duration_seconds
-    )
+    updated |= _assign_if_changed(existing, "duration_seconds", metadata.duration_seconds)
     updated |= _assign_if_changed(existing, "atmos_detected", metadata.atmos_detected)
 
     if updated:
@@ -286,3 +341,17 @@ def _assign_if_changed(model: FileModel, attr: str, value: object) -> bool:
         setattr(model, attr, value)
         return True
     return False
+
+
+def _clean_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _normalize_entity_name(value: str | None) -> str | None:
+    cleaned = _clean_text(value)
+    if cleaned is None:
+        return None
+    return cleaned.casefold()

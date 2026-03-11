@@ -11,9 +11,7 @@ from hsaj.db import init_database
 from hsaj.db.models import PlayHistory
 
 
-def test_history_command_shows_recent_entries(
-    tmp_path: Path, capsys
-) -> None:
+def test_history_command_shows_recent_entries(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "hsaj.yaml"
     db_path = tmp_path / "hsaj.db"
     config_path.write_text(

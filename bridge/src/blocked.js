@@ -149,4 +149,20 @@ export const loadBlockedObjects = (env = process.env) => {
   return parseBlockedPayload(raw);
 };
 
-export const createBlockedProvider = (env = process.env) => () => loadBlockedObjects(env);
+export const describeBlockedSource = (env = process.env) => {
+  const inlineJson = normalizeString(env.BRIDGE_BLOCKED_JSON);
+  if (inlineJson) {
+    return { configured: true, mode: "inline_json" };
+  }
+  const filePath = normalizeString(env.BRIDGE_BLOCKED_FILE);
+  if (filePath) {
+    return { configured: true, mode: "file", file_path: filePath };
+  }
+  return { configured: false, mode: "unconfigured" };
+};
+
+export const createBlockedProvider = (env = process.env) => {
+  const provider = () => loadBlockedObjects(env);
+  provider.describe = () => describeBlockedSource(env);
+  return provider;
+};

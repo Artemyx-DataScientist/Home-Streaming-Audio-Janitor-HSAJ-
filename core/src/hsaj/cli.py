@@ -1,4 +1,4 @@
-# ruff: noqa: B008
+# ruff: noqa: B008, I001
 import asyncio
 import os
 from dataclasses import dataclass
@@ -13,18 +13,23 @@ from .blocking import fetch_blocked_from_bridge, sync_blocked_objects
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
 from .db.models import BlockCandidate, PlayHistory, RoonItemCache
-from .executor import apply_plan, restore_from_quarantine
+from .exemptions import add_exemption, deactivate_exemption, list_exemptions
+from .executor import apply_plan, cleanup_retention, restore_from_quarantine
+from .logging_utils import configure_logging
 from .planner import build_plan
 from .roon import BridgeClientError, cache_roon_track, fetch_track_from_bridge
 from .scanner import scan_library
+from .server import serve_operator_api
 from .timeutils import utc_isoformat, utc_now
-from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
+from .transport import TransportEventProcessor, listen_to_bridge
 
 app = typer.Typer(help="HSAJ core CLI")
 db_app = typer.Typer(help="Database operations")
 roon_app = typer.Typer(help="Roon integration")
+exempt_app = typer.Typer(help="Manual exemptions")
 app.add_typer(db_app, name="db")
 app.add_typer(roon_app, name="roon")
+app.add_typer(exempt_app, name="exempt")
 
 
 @dataclass(slots=True)
@@ -45,10 +50,12 @@ def _load_config_or_exit(config_path: Optional[Path]) -> Path:
 
 def _read_config_or_exit(config_path: Path) -> LoadedConfig:
     try:
-        return load_config(config_path)
+        loaded = load_config(config_path)
     except ConfigError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
+    configure_logging(loaded.config)
+    return loaded
 
 
 def _warm_track_cache(
@@ -221,6 +228,11 @@ def plan_command(
                 f"files={item.matched_file_ids or '[]'} reason={item.reason}"
             )
 
+    if plan.soft_candidates:
+        typer.echo("Soft candidates (advisory only):")
+        for item in plan.soft_candidates:
+            typer.echo(f"- file_id={item.file_id}: {item.source} reason={item.reason}")
+
     typer.echo("Plan JSON:")
     typer.echo(plan.to_json())
 
@@ -245,9 +257,7 @@ def apply_command(
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
         plan = build_plan(session=session, config=loaded.config)
-        result = apply_plan(
-            session=session, config=loaded.config, plan=plan, dry_run=dry_run
-        )
+        result = apply_plan(session=session, config=loaded.config, plan=plan, dry_run=dry_run)
 
     if dry_run:
         typer.echo("dry_run: no files were changed; plan and dry_run entries were logged")
@@ -320,7 +330,7 @@ def listen_command(
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
-    ws_url = os.environ.get("HSAJ_BRIDGE_WS", DEFAULT_BRIDGE_WS_URL)
+    ws_url = os.environ.get("HSAJ_BRIDGE_WS", loaded.config.bridge.ws_url)
 
     engine, _ = init_database(loaded.config.database)
 
@@ -366,7 +376,7 @@ def roon_sync_command(
     loaded = _read_config_or_exit(resolved_path)
 
     try:
-        blocked = fetch_blocked_from_bridge(base_url=bridge_url)
+        blocked = fetch_blocked_from_bridge(base_url=bridge_url or loaded.config.bridge.http_url)
     except BridgeClientError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
@@ -374,9 +384,7 @@ def roon_sync_command(
     engine, _ = init_database(loaded.config.database)
     cache_result = TrackCacheWarmupResult()
     resolved_grace_days = (
-        loaded.config.policy.block_grace_days
-        if grace_days is None
-        else grace_days
+        loaded.config.policy.block_grace_days if grace_days is None else grace_days
     )
     with Session(engine) as session:
         result = sync_blocked_objects(
@@ -387,7 +395,10 @@ def roon_sync_command(
         )
 
         if cache_tracks:
-            cache_result = _warm_track_cache(session=session, bridge_url=bridge_url)
+            cache_result = _warm_track_cache(
+                session=session,
+                bridge_url=bridge_url or loaded.config.bridge.http_url,
+            )
         session.commit()
 
     typer.echo(
@@ -436,6 +447,154 @@ def restore_command(
         return
 
     typer.echo(f"Restored file: {result.original_path}")
+
+
+@app.command("cleanup", help="Apply quarantine retention policy")
+def cleanup_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        is_flag=False,
+        help="Path to hsaj.yaml",
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        result = cleanup_retention(session=session, config=loaded.config)
+
+    typer.echo(
+        f"Cleanup finished. deleted={len(result.deleted_candidates)} "
+        f"expired={len(result.expired_candidates)}"
+    )
+
+
+@app.command("serve", help="Run the operator HTTP API and UI")
+def serve_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        is_flag=False,
+        help="Path to hsaj.yaml",
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    server = serve_operator_api(loaded.config)
+    typer.echo(
+        f"Operator API listening on http://{loaded.config.security.operator_host}:"
+        f"{loaded.config.security.operator_port}"
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
+@exempt_app.command("list", help="List manual exemptions")
+def exempt_list_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        is_flag=False,
+        help="Path to hsaj.yaml",
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        exemptions = list_exemptions(session)
+    for exemption in exemptions:
+        typer.echo(
+            f"{exemption.id}: scope={exemption.scope_type} active={exemption.active} "
+            f"artist={exemption.artist or '-'} album={exemption.album or '-'} "
+            f"title={exemption.title or '-'} path={exemption.path or '-'} "
+            f"file_id={exemption.file_id if exemption.file_id is not None else '-'} "
+            f"reason={exemption.reason or '-'}"
+        )
+
+
+@exempt_app.command("add-file", help="Add a file-level exemption")
+def exempt_add_file_command(
+    file_id: int = typer.Argument(...),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", is_flag=False, help="Path to hsaj.yaml"
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        exemption = add_exemption(session, scope_type="file_id", file_id=file_id, reason=reason)
+        session.commit()
+    typer.echo(f"Created exemption {exemption.id}")
+
+
+@exempt_app.command("add-artist", help="Add an artist-level exemption")
+def exempt_add_artist_command(
+    artist: str = typer.Argument(...),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", is_flag=False, help="Path to hsaj.yaml"
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        exemption = add_exemption(session, scope_type="artist", artist=artist, reason=reason)
+        session.commit()
+    typer.echo(f"Created exemption {exemption.id}")
+
+
+@exempt_app.command("add-album", help="Add an album-level exemption")
+def exempt_add_album_command(
+    artist: str = typer.Argument(...),
+    album: str = typer.Argument(...),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", is_flag=False, help="Path to hsaj.yaml"
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        exemption = add_exemption(
+            session,
+            scope_type="album",
+            artist=artist,
+            album=album,
+            reason=reason,
+        )
+        session.commit()
+    typer.echo(f"Created exemption {exemption.id}")
+
+
+@exempt_app.command("remove", help="Deactivate an exemption")
+def exempt_remove_command(
+    exemption_id: int = typer.Argument(...),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", is_flag=False, help="Path to hsaj.yaml"
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        exemption = deactivate_exemption(session, exemption_id)
+        session.commit()
+    if exemption is None:
+        typer.echo("Exemption not found")
+        raise typer.Exit(code=1)
+    typer.echo(f"Deactivated exemption {exemption.id}")
 
 
 if __name__ == "__main__":

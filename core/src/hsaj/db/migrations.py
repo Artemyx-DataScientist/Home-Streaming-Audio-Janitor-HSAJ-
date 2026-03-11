@@ -7,7 +7,18 @@ from typing import Callable, Iterable
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from .models import Base, BlockCandidate, PlayHistory, RoonBlockRaw, RoonItemCache
+from .models import (
+    Base,
+    BlockCandidate,
+    Exemption,
+    LibraryAlbum,
+    LibraryArtist,
+    LibraryTrack,
+    PlanRun,
+    PlayHistory,
+    RoonBlockRaw,
+    RoonItemCache,
+)
 
 MigrationCallable = Callable[[Connection], None]
 
@@ -77,10 +88,7 @@ def _migration_v4(conn: Connection) -> None:
 
 
 def _migration_v5(conn: Connection) -> None:
-    existing_columns = {
-        row[1]
-        for row in conn.execute(text("PRAGMA table_info(files)")).fetchall()
-    }
+    existing_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(files)")).fetchall()}
     if "atmos_detected" in existing_columns:
         return
     conn.execute(
@@ -95,12 +103,10 @@ def _migration_v5(conn: Connection) -> None:
 
 def _migration_v6(conn: Connection) -> None:
     raw_columns = {
-        row[1]
-        for row in conn.execute(text("PRAGMA table_info(roon_blocks_raw)")).fetchall()
+        row[1] for row in conn.execute(text("PRAGMA table_info(roon_blocks_raw)")).fetchall()
     }
     candidate_columns = {
-        row[1]
-        for row in conn.execute(text("PRAGMA table_info(block_candidates)")).fetchall()
+        row[1] for row in conn.execute(text("PRAGMA table_info(block_candidates)")).fetchall()
     }
 
     if "metadata_json" not in raw_columns:
@@ -121,6 +127,80 @@ def _migration_v6(conn: Connection) -> None:
                 """
             )
         )
+
+
+def _migration_v7(conn: Connection) -> None:
+    action_columns = {
+        row[1] for row in conn.execute(text("PRAGMA table_info(actions_log)")).fetchall()
+    }
+    candidate_columns = {
+        row[1] for row in conn.execute(text("PRAGMA table_info(block_candidates)")).fetchall()
+    }
+
+    if "request_id" not in action_columns:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE actions_log
+                ADD COLUMN request_id TEXT NULL
+                """
+            )
+        )
+    if "plan_id" not in action_columns:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE actions_log
+                ADD COLUMN plan_id TEXT NULL
+                """
+            )
+        )
+
+    additions = {
+        "source": (
+            """
+            ALTER TABLE block_candidates
+            ADD COLUMN source TEXT NOT NULL DEFAULT 'bridge.blocked.v1'
+            """
+        ),
+        "rule_id": (
+            """
+            ALTER TABLE block_candidates
+            ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''
+            """
+        ),
+        "explanation_json": (
+            """
+            ALTER TABLE block_candidates
+            ADD COLUMN explanation_json TEXT NULL
+            """
+        ),
+        "delete_after": (
+            """
+            ALTER TABLE block_candidates
+            ADD COLUMN delete_after DATETIME NULL
+            """
+        ),
+        "last_transition_at": (
+            """
+            ALTER TABLE block_candidates
+            ADD COLUMN last_transition_at DATETIME NULL
+            """
+        ),
+    }
+    for column_name, statement in additions.items():
+        if column_name in candidate_columns:
+            continue
+        conn.execute(text(statement))
+
+    Exemption.__table__.create(bind=conn, checkfirst=True)
+    PlanRun.__table__.create(bind=conn, checkfirst=True)
+
+
+def _migration_v8(conn: Connection) -> None:
+    LibraryArtist.__table__.create(bind=conn, checkfirst=True)
+    LibraryAlbum.__table__.create(bind=conn, checkfirst=True)
+    LibraryTrack.__table__.create(bind=conn, checkfirst=True)
 
 
 MIGRATIONS: list[Migration] = [
@@ -154,12 +234,20 @@ MIGRATIONS: list[Migration] = [
         description="Add metadata_json to roon_blocks_raw and block_candidates",
         upgrade=_migration_v6,
     ),
+    Migration(
+        version="0007_operator_and_retention_foundations",
+        description="Add exemptions, plan_runs, retention, and structured action metadata",
+        upgrade=_migration_v7,
+    ),
+    Migration(
+        version="0008_normalized_library_graph",
+        description="Add normalized artist, album, and track graph tables",
+        upgrade=_migration_v8,
+    ),
 ]
 
 
-def apply_migrations(
-    engine: Engine, migrations: Iterable[Migration] | None = None
-) -> str | None:
+def apply_migrations(engine: Engine, migrations: Iterable[Migration] | None = None) -> str | None:
     """Применяет миграции по порядку и возвращает последнюю применённую версию."""
 
     migration_plan = list(migrations or MIGRATIONS)

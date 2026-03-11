@@ -32,6 +32,7 @@ class BlockedObject:
     title: str | None = None
     track_number: int | None = None
     duration_ms: int | None = None
+    source: str = "bridge.blocked.v1"
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "BlockedObject":
@@ -52,9 +53,7 @@ class BlockedObject:
             artist=_normalize_string(payload.get("artist")),
             album=_normalize_string(payload.get("album")),
             title=_normalize_string(payload.get("title")),
-            track_number=_parse_optional_int(
-                payload.get("trackno") or payload.get("track_number")
-            ),
+            track_number=_parse_optional_int(payload.get("trackno") or payload.get("track_number")),
             duration_ms=_parse_optional_int(payload.get("duration_ms")),
         )
 
@@ -83,6 +82,24 @@ class SyncResult:
 
 def _reason_for(blocked: BlockedObject) -> str:
     return f"blocked_by_{blocked.object_type}"
+
+
+def _explanation_for(blocked: BlockedObject) -> str:
+    return json.dumps(
+        {
+            "source": blocked.source,
+            "object_type": blocked.object_type,
+            "object_id": blocked.object_id,
+            "label": blocked.label,
+            "artist": blocked.artist,
+            "album": blocked.album,
+            "title": blocked.title,
+            "track_number": blocked.track_number,
+            "duration_ms": blocked.duration_ms,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -143,10 +160,14 @@ def upsert_block_candidate(
         existing.label = blocked.label
         existing.metadata_json = blocked.metadata_json()
         existing.reason = _reason_for(blocked)
+        existing.source = blocked.source
+        existing.rule_id = _reason_for(blocked)
+        existing.explanation_json = _explanation_for(blocked)
         existing.last_seen_at = normalized_seen
         if existing.status == "restored":
             existing.status = "planned"
             existing.restored_at = None
+        existing.last_transition_at = normalized_seen
         return existing, False
 
     planned_action_at = normalized_seen + timedelta(days=grace_period_days)
@@ -157,9 +178,13 @@ def upsert_block_candidate(
         metadata_json=blocked.metadata_json(),
         reason=_reason_for(blocked),
         status="planned",
+        source=blocked.source,
+        rule_id=_reason_for(blocked),
+        explanation_json=_explanation_for(blocked),
         first_seen_at=normalized_seen,
         last_seen_at=normalized_seen,
         planned_action_at=planned_action_at,
+        last_transition_at=normalized_seen,
     )
     session.add(candidate)
     return candidate, True
@@ -184,7 +209,9 @@ def mark_restored_candidates(
         candidate.status = "restored"
         candidate.restored_at = normalized_restored
         candidate.planned_action_at = None
+        candidate.delete_after = None
         candidate.last_seen_at = normalized_restored
+        candidate.last_transition_at = normalized_restored
         restored.append(candidate)
     return restored
 
@@ -205,9 +232,7 @@ def sync_blocked_objects(
 
     for item in blocked_items:
         active_keys.add((item.object_type, item.object_id))
-        _, created_raw = upsert_raw_block(
-            session=session, blocked=item, seen_at=timestamp
-        )
+        _, created_raw = upsert_raw_block(session=session, blocked=item, seen_at=timestamp)
         if created_raw:
             raw_created += 1
         else:
@@ -240,23 +265,17 @@ def fetch_blocked_from_bridge(
 ) -> list[BlockedObject]:
     """Fetch blocked objects from the bridge."""
 
-    bridge_base = (
-        base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
-    )
+    bridge_base = base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
     url = f"{bridge_base.rstrip('/')}/blocked"
     request = Request(url, headers=build_bridge_headers(accept="application/json"))
 
     try:
-        with urlopen(
-            request, timeout=timeout
-        ) as response:  # noqa: S310 - controlled URL source
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - controlled URL source
             payload = response.read().decode("utf-8")
             if response.status == 501:
                 raise BridgeClientError("Bridge does not implement /blocked (501)")
             if response.status != 200:
-                raise BridgeClientError(
-                    f"Bridge returned status {response.status} for /blocked"
-                )
+                raise BridgeClientError(f"Bridge returned status {response.status} for /blocked")
     except (HTTPError, URLError, TimeoutError) as exc:
         raise BridgeClientError(f"Could not fetch /blocked: {exc}") from exc
 

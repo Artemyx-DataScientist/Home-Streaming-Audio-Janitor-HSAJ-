@@ -27,3 +27,20 @@ policy:
   quarantine_delete_days: 60
   auto_delete: false
   enable_behavior_scoring: true
+  soft_never_played_days: 180
+  soft_inbox_days: 30
+
+bridge:
+  http_url: http://127.0.0.1:8080
+  ws_url: ws://127.0.0.1:8080/events
+  contract_version: v1
+
+security:
+  operator_host: 127.0.0.1
+  operator_port: 8090
+  operator_token: null
+
+observability:
+  log_level: INFO
+  structured_logging: true
+  service_name: hsaj-core

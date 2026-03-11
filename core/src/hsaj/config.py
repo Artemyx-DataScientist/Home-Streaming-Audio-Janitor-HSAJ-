@@ -160,6 +160,72 @@ class PolicyConfig(BaseModel):
         default=True,
         description="Reserved flag for future soft-scoring heuristics.",
     )
+    soft_never_played_days: int = Field(
+        default=180,
+        ge=0,
+        description="Age threshold for advisory never-played candidates.",
+    )
+    soft_inbox_days: int = Field(
+        default=30,
+        ge=0,
+        description="Age threshold for advisory inbox cleanup candidates.",
+    )
+
+
+class BridgeConfig(BaseModel):
+    """Bridge connectivity and contract settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    http_url: str = Field(
+        default="http://localhost:8080",
+        description="Base HTTP URL for the bridge.",
+    )
+    ws_url: str = Field(
+        default="ws://localhost:8080/events",
+        description="WebSocket URL for bridge transport events.",
+    )
+    contract_version: str = Field(
+        default="v1",
+        description="Expected bridge contract version.",
+    )
+
+
+class SecurityConfig(BaseModel):
+    """Security settings for operator-facing surfaces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operator_host: str = Field(
+        default="127.0.0.1",
+        description="Bind host for the core operator API.",
+    )
+    operator_port: int = Field(
+        default=8090,
+        ge=1,
+        le=65535,
+        description="Bind port for the core operator API.",
+    )
+    operator_token: str | None = Field(
+        default=None,
+        description="Optional shared token required for operator API requests.",
+    )
+
+
+class ObservabilityConfig(BaseModel):
+    """Logging and diagnostics settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    log_level: str = Field(default="INFO", description="Application log level.")
+    structured_logging: bool = Field(
+        default=True,
+        description="Emit structured JSON logs where available.",
+    )
+    service_name: str = Field(
+        default="hsaj-core",
+        description="Service name included in structured logs and metrics.",
+    )
 
 
 class HsajConfig(BaseModel):
@@ -170,6 +236,9 @@ class HsajConfig(BaseModel):
     database: DatabaseConfig
     paths: PathsConfig = Field(default_factory=PathsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    bridge: BridgeConfig = Field(default_factory=BridgeConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
     def resolve_relative_paths(self, base_path: Path) -> "HsajConfig":
         """Return a copy with paths resolved relative to the config file."""
@@ -235,10 +304,14 @@ def load_config(config_path: Path) -> LoadedConfig:
     except Exception as exc:  # pragma: no cover - defensive wrapper
         raise ConfigError(f"Unexpected config error: {exc}") from exc
 
-    return LoadedConfig(
-        config=parsed.resolve_relative_paths(config_path.parent),
-        source_path=config_path,
-    )
+    resolved = parsed.resolve_relative_paths(config_path.parent)
+
+    operator_token = os.environ.get("HSAJ_OPERATOR_TOKEN")
+    if operator_token is not None:
+        cleaned = operator_token.strip()
+        resolved.security.operator_token = cleaned or None
+
+    return LoadedConfig(config=resolved, source_path=config_path)
 
 
 def find_config_path(explicit: Optional[Path]) -> Path:

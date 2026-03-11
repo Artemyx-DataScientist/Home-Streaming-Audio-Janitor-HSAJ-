@@ -2,7 +2,7 @@
 
 HSAJ is split into two parts:
 - `bridge/` is a Node.js bridge that connects to Roon, exposes HTTP endpoints, and broadcasts transport events over WebSocket.
-- `core/` is a Python engine that scans the library, stores metadata in SQLite, builds plans, and applies quarantine/Atmos actions.
+- `core/` is a Python engine that scans the library, stores metadata in SQLite, builds previewable plans, applies quarantine/Atmos actions, manages retention, and serves an operator API/UI.
 
 ## Development setup
 
@@ -44,6 +44,16 @@ The bridge exposes:
 - `GET /blocked`, backed by `BRIDGE_BLOCKED_FILE` or `BRIDGE_BLOCKED_JSON`
 - WebSocket `ws://127.0.0.1:8080/events` for `transport_event` payloads
 
+`GET /health` now also reports:
+- `contract_version`
+- `blocked_source`
+- `security`
+
+Operational bridge probes:
+- `GET /live`
+- `GET /ready`
+- `GET /metrics`
+
 Observed transport events are sourced from Roon transport subscriptions. Demo tracks and demo blocks are no longer used.
 `/blocked` accepts `artist`, `album`, and `track` objects and preserves metadata like `artist`, `album`, `title`, `track_number`, and `duration_ms` for the core inheritance flow.
 
@@ -69,11 +79,41 @@ Common commands:
 - `hsaj roon sync --config configs/hsaj.yaml --cache-tracks`
 - `hsaj plan --config configs/hsaj.yaml`
 - `hsaj apply --config configs/hsaj.yaml --dry-run`
+- `hsaj cleanup --config configs/hsaj.yaml`
 - `hsaj restore <file_id-or-path> --config configs/hsaj.yaml`
+- `hsaj serve --config configs/hsaj.yaml`
+- `hsaj exempt list --config configs/hsaj.yaml`
+- `hsaj exempt add-file 123 --config configs/hsaj.yaml`
+- `hsaj exempt add-artist "Artist Name" --config configs/hsaj.yaml`
+- `hsaj exempt add-album "Artist Name" "Album Name" --config configs/hsaj.yaml`
 
 `hsaj roon sync --cache-tracks` now closes the loop for track blocks by fetching `/track/{id}` and warming `RoonItemCache` before planning.
 
 `hsaj apply --dry-run` now records the full serialized plan in `actions_log` with `action="plan"`, plus a `dry_run` marker.
+
+`hsaj cleanup` applies quarantine retention policy:
+- if `policy.auto_delete=false`, expired candidates are marked as `expired`
+- if `policy.auto_delete=true`, due quarantine files are physically deleted and logged
+
+`hsaj serve` starts the operator API and a thin built-in UI. The core exposes:
+- `GET /`
+- `GET /live`
+- `GET /health`
+- `GET /ready`
+- `GET /metrics`
+- `GET /plan`
+- `POST /apply`
+- `POST /restore`
+- `POST /cleanup`
+- `GET /candidates`
+- `GET /actions`
+- `GET /stats`
+- `GET /exemptions`
+- `POST /exemptions`
+- `DELETE /exemptions/{id}`
+
+If `security.operator_token` or `HSAJ_OPERATOR_TOKEN` is set, operator routes require
+`X-HSAJ-Operator-Token`. Health, live, ready, and metrics remain available for probes.
 
 ## CI
 

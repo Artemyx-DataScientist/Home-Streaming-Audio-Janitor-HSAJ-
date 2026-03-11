@@ -14,6 +14,7 @@ const DEFAULT_HOST = process.env.BRIDGE_HOST ?? "127.0.0.1";
 const DEFAULT_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? process.env.PORT ?? "8080", 10);
 const BRIDGE_SOURCE = process.env.BRIDGE_SOURCE ?? "bridge";
 const SHARED_SECRET = (process.env.BRIDGE_SHARED_SECRET ?? "").trim();
+const CONTRACT_VERSION = "v1";
 
 const isLoopbackHost = (host) =>
   host === "127.0.0.1" || host === "localhost" || host === "::1";
@@ -83,10 +84,41 @@ const buildObservedTrackId = ({ zoneId, title, artist, album, durationMs, trackn
   return `observed:${Buffer.from(identity).toString("base64url")}`;
 };
 
-const buildHealthResponse = (roonStatus) => ({ status: "ok", roon: roonStatus });
+const buildHealthResponse = (roonStatus, blockedProvider) => ({
+  status: "ok",
+  roon: roonStatus,
+  contract_version: CONTRACT_VERSION,
+  blocked_source: blockedProvider.describe ? blockedProvider.describe() : { configured: false, mode: "unknown" },
+  security: {
+    loopback_only: isLoopbackHost(DEFAULT_HOST),
+    auth_required: Boolean(SHARED_SECRET),
+  },
+});
+
+const buildReadyResponse = (roonStatus, blockedProvider) => ({
+  status: "ready",
+  roon: roonStatus,
+  contract_version: CONTRACT_VERSION,
+  blocked_source: blockedProvider.describe ? blockedProvider.describe() : { configured: false, mode: "unknown" },
+});
+
+const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
+  const blockedSource = blockedProvider.describe ? blockedProvider.describe() : { configured: false };
+  return [
+    `hsaj_bridge_transport_events_total ${metrics.transportEventsTotal}`,
+    `hsaj_bridge_track_start_total ${metrics.trackStartsTotal}`,
+    `hsaj_bridge_track_stop_total ${metrics.trackStopsTotal}`,
+    `hsaj_bridge_ws_clients ${metrics.wsClients}`,
+    `hsaj_bridge_track_cache_entries ${metrics.trackCacheEntries}`,
+    `hsaj_bridge_blocked_source_configured ${blockedSource.configured ? 1 : 0}`,
+    `hsaj_bridge_auth_required ${SHARED_SECRET ? 1 : 0}`,
+    `hsaj_bridge_roon_connected ${roonStatus === "connected" ? 1 : 0}`,
+  ].join("\n") + "\n";
+};
 
 const buildTransportMessage = (payload, source) =>
   JSON.stringify({
+    contract_version: CONTRACT_VERSION,
     type: "transport_event",
     event: {
       ...payload,
@@ -152,6 +184,8 @@ const createObservedState = () => {
   const zoneNames = new Map();
   /** @type {(payload: object) => void} */
   let broadcast = () => {};
+  /** @type {(() => void) | null} */
+  let onTrackRemembered = null;
 
   const rememberTrack = (track) => {
     tracksById.set(track.roon_track_id, {
@@ -162,6 +196,9 @@ const createObservedState = () => {
       duration_ms: track.duration_ms,
       trackno: track.trackno,
     });
+    if (onTrackRemembered) {
+      onTrackRemembered();
+    }
   };
 
   const stopZone = (zoneId) => {
@@ -249,16 +286,37 @@ const createObservedState = () => {
     setBroadcaster: (fn) => {
       broadcast = fn;
     },
+    setOnTrackRemembered: (fn) => {
+      onTrackRemembered = fn;
+    },
+    trackCount: () => tracksById.size,
     updateZone,
   };
 };
 
-const startApiServer = (port, host, healthProvider, trackProvider, blockedProvider) => {
+const startApiServer = (port, host, healthProvider, readyProvider, metricsProvider, trackProvider, blockedProvider) => {
   const server = http.createServer((req, res) => {
     const url = getRequestUrl(req);
 
+    if (req.method === "GET" && url.pathname === "/live") {
+      sendJson(res, 200, { status: "live", contract_version: CONTRACT_VERSION });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, healthProvider());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/ready") {
+      sendJson(res, 200, readyProvider());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/metrics") {
+      const payload = metricsProvider();
+      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+      res.end(payload);
       return;
     }
 
@@ -305,7 +363,7 @@ const startApiServer = (port, host, healthProvider, trackProvider, blockedProvid
   return server;
 };
 
-const startWebSocketChannel = (server, path, source) => {
+const startWebSocketChannel = (server, path, source, metrics) => {
   const wss = new WebSocketServer({
     server,
     path,
@@ -319,6 +377,13 @@ const startWebSocketChannel = (server, path, source) => {
   });
 
   const broadcastTransportEvent = (payload) => {
+    metrics.transportEventsTotal += 1;
+    if (payload.event === "track_start") {
+      metrics.trackStartsTotal += 1;
+    }
+    if (payload.event === "track_stop") {
+      metrics.trackStopsTotal += 1;
+    }
     const message = buildTransportMessage(payload, source);
     wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -329,7 +394,13 @@ const startWebSocketChannel = (server, path, source) => {
   };
 
   wss.on("connection", () => {
+    metrics.wsClients = wss.clients.size;
     console.log(`[ws] client subscribed to ${path}`);
+  });
+  wss.on("connection", (client) => {
+    client.on("close", () => {
+      metrics.wsClients = wss.clients.size;
+    });
   });
 
   return { broadcastTransportEvent };
@@ -399,16 +470,28 @@ const startBridge = () => {
   ensureSecurityConfiguration(DEFAULT_HOST, SHARED_SECRET);
 
   const roonConnection = { status: /** @type {"connected" | "disconnected"} */ ("disconnected") };
+  const metrics = {
+    transportEventsTotal: 0,
+    trackStartsTotal: 0,
+    trackStopsTotal: 0,
+    wsClients: 0,
+    trackCacheEntries: 0,
+  };
   const observedState = createObservedState();
+  observedState.setOnTrackRemembered(() => {
+    metrics.trackCacheEntries = observedState.trackCount();
+  });
   const blockedProvider = createBlockedProvider(process.env);
   const server = startApiServer(
     DEFAULT_PORT,
     DEFAULT_HOST,
-    () => buildHealthResponse(roonConnection.status),
+    () => buildHealthResponse(roonConnection.status, blockedProvider),
+    () => buildReadyResponse(roonConnection.status, blockedProvider),
+    () => buildMetricsResponse(metrics, roonConnection.status, blockedProvider),
     observedState.getTrack,
     blockedProvider,
   );
-  const channel = startWebSocketChannel(server, DEFAULT_WS_PATH, BRIDGE_SOURCE);
+  const channel = startWebSocketChannel(server, DEFAULT_WS_PATH, BRIDGE_SOURCE, metrics);
   observedState.setBroadcaster(channel.broadcastTransportEvent);
   createRoonClient(roonConnection, observedState);
 

@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from hsaj.config import ConfigError, LoadedConfig, find_config_path, load_config
 from hsaj.db import init_database
+from hsaj.logging_utils import configure_logging
 from hsaj.transport import (
-    DEFAULT_BRIDGE_WS_URL,
     TransportEventProcessor,
     listen_to_bridge,
 )
@@ -35,26 +35,24 @@ def _build_session_factory(engine: Engine) -> Callable[[], Session]:
 def main() -> None:
     """Точка входа: подключение к bridge по WebSocket и логирование событий."""
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    ws_url = os.environ.get("HSAJ_BRIDGE_WS", DEFAULT_BRIDGE_WS_URL)
-
     try:
         loaded_config = _load_config()
     except ConfigError as exc:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
         logging.error("Не удалось загрузить конфиг: %s", exc)
         raise SystemExit(1) from exc
 
+    configure_logging(loaded_config.config)
+    ws_url = os.environ.get("HSAJ_BRIDGE_WS", loaded_config.config.bridge.ws_url)
     engine, _ = init_database(loaded_config.config.database)
     processor = TransportEventProcessor(session_factory=_build_session_factory(engine))
     stop_event = asyncio.Event()
 
     try:
-        asyncio.run(
-            listen_to_bridge(ws_url=ws_url, processor=processor, stop_event=stop_event)
-        )
+        asyncio.run(listen_to_bridge(ws_url=ws_url, processor=processor, stop_event=stop_event))
     except KeyboardInterrupt:
         stop_event.set()
         logging.info("Отключение от bridge по Ctrl+C")

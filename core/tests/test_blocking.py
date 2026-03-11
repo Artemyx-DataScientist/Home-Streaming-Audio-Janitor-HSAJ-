@@ -21,15 +21,11 @@ def test_upsert_raw_block_preserves_first_seen() -> None:
     blocked = BlockedObject(object_type="track", object_id="t1", label="Track 1")
 
     with _session() as session:
-        _, created_first = upsert_raw_block(
-            session=session, blocked=blocked, seen_at=seen_at
-        )
+        _, created_first = upsert_raw_block(session=session, blocked=blocked, seen_at=seen_at)
         session.commit()
         assert created_first is True
 
-        _, created_second = upsert_raw_block(
-            session=session, blocked=blocked, seen_at=later
-        )
+        _, created_second = upsert_raw_block(session=session, blocked=blocked, seen_at=later)
         session.commit()
         assert created_second is False
 
@@ -75,9 +71,7 @@ def test_sync_blocked_creates_candidate_with_planned_action() -> None:
 def test_sync_blocked_does_not_shift_planned_on_repeat_sync() -> None:
     first_seen = datetime(2024, 3, 1, tzinfo=timezone.utc)
     later_seen = first_seen + timedelta(days=5)
-    blocked = [
-        BlockedObject(object_type="artist", object_id="artist-1", label="Artist 1")
-    ]
+    blocked = [BlockedObject(object_type="artist", object_id="artist-1", label="Artist 1")]
 
     with _session() as session:
         sync_blocked_objects(
@@ -105,11 +99,7 @@ def test_sync_blocked_does_not_shift_planned_on_repeat_sync() -> None:
 def test_sync_blocked_marks_restored_when_missing() -> None:
     seen_at = datetime(2024, 4, 1, tzinfo=timezone.utc)
     later = seen_at + timedelta(days=3)
-    blocked = [
-        BlockedObject(
-            object_type="track", object_id="t-restored", label="Restored Track"
-        )
-    ]
+    blocked = [BlockedObject(object_type="track", object_id="t-restored", label="Restored Track")]
 
     with _session() as session:
         sync_blocked_objects(
@@ -120,9 +110,7 @@ def test_sync_blocked_marks_restored_when_missing() -> None:
         )
         session.commit()
 
-        sync_blocked_objects(
-            session=session, blocked_items=[], grace_period_days=5, seen_at=later
-        )
+        sync_blocked_objects(session=session, blocked_items=[], grace_period_days=5, seen_at=later)
         session.commit()
 
         candidate = session.scalars(select(BlockCandidate)).one()

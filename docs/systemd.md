@@ -34,8 +34,14 @@ Important environment variables:
 - `HSAJ_BRIDGE_HTTP`
 - `HSAJ_BRIDGE_WS`
 - `HSAJ_BRIDGE_TOKEN`
+- `HSAJ_OPERATOR_TOKEN`
 
 Keep `BRIDGE_HOST=127.0.0.1` unless you have a clear reason to expose it differently. If you bind the bridge to a non-loopback host, set `BRIDGE_SHARED_SECRET`.
+If you expose the core operator API beyond localhost, set `HSAJ_OPERATOR_TOKEN` and pass it as `X-HSAJ-Operator-Token`.
+
+Operational probes:
+- bridge: `/live`, `/ready`, `/health`, `/metrics`
+- core operator API: `/live`, `/ready`, `/health`, `/metrics`
 
 ## Install and enable
 ```bash

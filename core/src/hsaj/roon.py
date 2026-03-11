@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .bridge_auth import build_bridge_headers
-from .db.models import File, RoonItemCache
+from .db.models import File, LibraryTrack, RoonItemCache
 
 DEFAULT_BRIDGE_HTTP_URL = "http://localhost:8080"
 
@@ -90,9 +90,7 @@ def fetch_track_from_bridge(
 ) -> RoonTrack:
     """Fetch normalized track metadata from the bridge via HTTP."""
 
-    bridge_base = (
-        base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
-    )
+    bridge_base = base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
     url = f"{bridge_base.rstrip('/')}/track/{quote(roon_track_id)}"
     request = Request(url, headers=build_bridge_headers(accept="application/json"))
 
@@ -104,9 +102,7 @@ def fetch_track_from_bridge(
                 )
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError) as exc:
-        raise BridgeClientError(
-            f"Could not fetch track {roon_track_id}: {exc}"
-        ) from exc
+        raise BridgeClientError(f"Could not fetch track {roon_track_id}: {exc}") from exc
 
     return RoonTrack.from_dict(payload)
 
@@ -144,6 +140,69 @@ def match_track_by_metadata(
 ) -> MappingResult:
     """Match a track by artist, album, title, track number, and duration."""
 
+    graph_size = session.scalar(select(func.count()).select_from(LibraryTrack)) or 0
+    if graph_size > 0:
+        return _match_track_by_library_graph(
+            session=session,
+            track=track,
+            duration_tolerance_seconds=duration_tolerance_seconds,
+        )
+
+    return _match_track_by_files(
+        session=session,
+        track=track,
+        duration_tolerance_seconds=duration_tolerance_seconds,
+    )
+
+
+def _match_track_by_library_graph(
+    session: Session,
+    track: RoonTrack,
+    duration_tolerance_seconds: int,
+) -> MappingResult:
+    filters = []
+
+    normalized_artist = _normalize_string(track.artist)
+    normalized_album = _normalize_string(track.album)
+    normalized_title = _normalize_string(track.title)
+
+    if normalized_artist is not None:
+        filters.append(LibraryTrack.normalized_artist_name == normalized_artist.casefold())
+    if normalized_album is not None:
+        filters.append(LibraryTrack.normalized_album_title == normalized_album.casefold())
+    if normalized_title is not None:
+        filters.append(LibraryTrack.normalized_title == normalized_title.casefold())
+    if track.track_number is not None:
+        filters.append(LibraryTrack.track_number == track.track_number)
+
+    if track.duration_ms is not None:
+        target_seconds = max(0, int(round(track.duration_ms / 1000)))
+        min_seconds = max(0, target_seconds - duration_tolerance_seconds)
+        max_seconds = target_seconds + duration_tolerance_seconds
+        filters.append(LibraryTrack.duration_seconds.between(min_seconds, max_seconds))
+
+    if not filters:
+        return MappingResult(confidence="low", candidates=[])
+
+    rows = session.execute(
+        select(LibraryTrack.file_id, File.path)
+        .join(File, File.id == LibraryTrack.file_id)
+        .where(*filters)
+        .order_by(LibraryTrack.file_id.asc())
+    ).all()
+    file_candidates = [FileCandidate(file_id=file_id, path=path) for file_id, path in rows]
+
+    confidence: Literal["high", "low"] = "high" if len(file_candidates) == 1 else "low"
+    return MappingResult(confidence=confidence, candidates=file_candidates)
+
+
+def _match_track_by_files(
+    session: Session,
+    track: RoonTrack,
+    duration_tolerance_seconds: int,
+) -> MappingResult:
+    """Compatibility fallback for databases that do not have graph rows yet."""
+
     filters = []
 
     normalized_artist = _normalize_string(track.artist)
@@ -169,9 +228,7 @@ def match_track_by_metadata(
         return MappingResult(confidence="low", candidates=[])
 
     candidates = session.scalars(select(File).where(*filters)).all()
-    file_candidates = [
-        FileCandidate(file_id=item.id, path=item.path) for item in candidates
-    ]
+    file_candidates = [FileCandidate(file_id=item.id, path=item.path) for item in candidates]
 
     confidence: Literal["high", "low"] = "high" if len(file_candidates) == 1 else "low"
     return MappingResult(confidence=confidence, candidates=file_candidates)

@@ -13,7 +13,7 @@ def test_db_init_and_status(tmp_path: Path) -> None:
     engine, version = init_database(db_config)
 
     assert engine is not None
-    assert version == "0006_block_metadata"
+    assert version == "0008_normalized_library_graph"
 
     status = database_status(db_config)
-    assert status == "0006_block_metadata"
+    assert status == "0008_normalized_library_graph"

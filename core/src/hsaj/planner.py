@@ -11,11 +11,25 @@ from sqlalchemy.orm import Session
 
 from .atmos import AtmosMovePlan, is_atmos, plan_atmos_moves
 from .config import HsajConfig
-from .db.models import BlockCandidate, File, RoonItemCache
+from .db.models import BlockCandidate, File, LibraryTrack, PlayHistory, RoonItemCache
+from .exemptions import match_file_exemption
 from .roon import RoonTrack, match_track_by_metadata
 from .timeutils import ensure_utc, utc_isoformat, utc_now
 
 BLOCK_PRIORITY = {"track": 0, "album": 1, "artist": 2}
+FORMAT_RANK = {
+    "wav": 100,
+    "aiff": 95,
+    "flac": 90,
+    "alac": 85,
+    "dsf": 80,
+    "m4a": 70,
+    "aac": 65,
+    "ogg": 60,
+    "opus": 60,
+    "mp3": 50,
+    "wma": 40,
+}
 
 
 @dataclass(slots=True)
@@ -28,6 +42,7 @@ class QuarantineMovePlan:
     planned_action_at: datetime | None
     object_type: str
     object_id: str
+    explanation: dict[str, object]
 
 
 @dataclass(slots=True)
@@ -38,6 +53,15 @@ class LowConfidencePlan:
     planned_action_at: datetime | None
     reason: str
     matched_file_ids: list[int]
+    explanation: dict[str, object]
+
+
+@dataclass(slots=True)
+class SoftCandidatePlan:
+    file_id: int
+    source: Path
+    reason: str
+    evidence: dict[str, object]
 
 
 @dataclass(slots=True)
@@ -46,6 +70,7 @@ class Plan:
     blocked_quarantine_due: list[QuarantineMovePlan]
     blocked_quarantine_future: list[QuarantineMovePlan]
     low_confidence: list[LowConfidencePlan]
+    soft_candidates: list[SoftCandidatePlan]
 
     def to_dict(self) -> dict[str, object]:
         def _serialize_path(value: Path) -> str:
@@ -72,6 +97,11 @@ class Plan:
             payload["planned_action_at"] = _serialize_datetime(item.planned_action_at)
             return payload
 
+        def _serialize_soft(item: SoftCandidatePlan) -> dict[str, object]:
+            payload = asdict(item)
+            payload["source"] = _serialize_path(item.source)
+            return payload
+
         return {
             "atmos_moves": [_serialize_move(item) for item in self.atmos_moves],
             "blocked_quarantine_due": [
@@ -81,6 +111,7 @@ class Plan:
                 _serialize_quarantine(item) for item in self.blocked_quarantine_future
             ],
             "low_confidence": [_serialize_low_conf(item) for item in self.low_confidence],
+            "soft_candidates": [_serialize_soft(item) for item in self.soft_candidates],
         }
 
     def to_json(self, *, ensure_ascii: bool = False, indent: int = 2) -> str:
@@ -166,12 +197,26 @@ def _metadata_int(value: object) -> int | None:
         return None
 
 
+def _normalized_lookup(value: str | None) -> str | None:
+    text = _metadata_string(value)
+    if text is None:
+        return None
+    return text.casefold()
+
+
 def _candidate_low_confidence(
     candidate: BlockCandidate,
     *,
     reason: str | None = None,
     matched_file_ids: list[int] | None = None,
 ) -> LowConfidencePlan:
+    explanation = {
+        "reason": reason or candidate.reason,
+        "rule_id": candidate.rule_id,
+        "source": candidate.source,
+        "object_type": candidate.object_type,
+        "object_id": candidate.object_id,
+    }
     return LowConfidencePlan(
         candidate_id=candidate.id,
         object_type=candidate.object_type,
@@ -179,6 +224,7 @@ def _candidate_low_confidence(
         planned_action_at=_safe_datetime(candidate.planned_action_at),
         reason=reason or candidate.reason,
         matched_file_ids=matched_file_ids or [],
+        explanation=explanation,
     )
 
 
@@ -239,30 +285,48 @@ def _resolve_files_for_candidate(
     metadata = _candidate_metadata(candidate)
     artist = _metadata_string(metadata.get("artist"))
     album = _metadata_string(metadata.get("album"))
+    graph_size = session.scalar(select(func.count()).select_from(LibraryTrack)) or 0
 
     if candidate.object_type == "artist":
         artist = artist or _metadata_string(candidate.label)
         if artist is None:
             return ([], [_candidate_low_confidence(candidate)])
-        matches = session.scalars(
-            select(File).where(func.lower(File.artist) == artist.lower())
-        ).all()
+        if graph_size > 0:
+            normalized_artist = _normalized_lookup(artist)
+            matches = session.scalars(
+                select(File)
+                .join(LibraryTrack, LibraryTrack.file_id == File.id)
+                .where(LibraryTrack.normalized_artist_name == normalized_artist)
+                .order_by(File.id.asc())
+            ).all()
+        else:
+            matches = session.scalars(
+                select(File).where(func.lower(File.artist) == artist.lower())
+            ).all()
     elif candidate.object_type == "album":
         album = album or _metadata_string(candidate.label)
         if album is None:
             return ([], [_candidate_low_confidence(candidate)])
-        filters = [func.lower(File.album) == album.lower()]
-        if artist is not None:
-            filters.append(func.lower(File.artist) == artist.lower())
-        matches = session.scalars(select(File).where(*filters)).all()
+        if graph_size > 0:
+            normalized_album = _normalized_lookup(album)
+            filters = [LibraryTrack.normalized_album_title == normalized_album]
+            if artist is not None:
+                filters.append(LibraryTrack.normalized_artist_name == _normalized_lookup(artist))
+            matches = session.scalars(
+                select(File)
+                .join(LibraryTrack, LibraryTrack.file_id == File.id)
+                .where(*filters)
+                .order_by(File.id.asc())
+            ).all()
+        else:
+            filters = [func.lower(File.album) == album.lower()]
+            if artist is not None:
+                filters.append(func.lower(File.artist) == artist.lower())
+            matches = session.scalars(select(File).where(*filters)).all()
     else:
         return (
             [],
-            [
-                _candidate_low_confidence(
-                    candidate, reason=f"{candidate.reason}:unsupported_type"
-                )
-            ],
+            [_candidate_low_confidence(candidate, reason=f"{candidate.reason}:unsupported_type")],
         )
 
     eligible_matches = [item for item in matches if _is_file_eligible(item, config)]
@@ -272,6 +336,7 @@ def _resolve_files_for_candidate(
 
 
 def _build_move_for_file(
+    session: Session,
     candidate: BlockCandidate,
     file_record: File,
     config: HsajConfig,
@@ -279,6 +344,16 @@ def _build_move_for_file(
     date_folder: str,
 ) -> tuple[QuarantineMovePlan | None, LowConfidencePlan | None]:
     source_path = Path(file_record.path)
+    exemption = match_file_exemption(session, file_record)
+    if exemption is not None:
+        return (
+            None,
+            _candidate_low_confidence(
+                candidate,
+                reason=f"{candidate.reason}:exempt",
+                matched_file_ids=[file_record.id],
+            ),
+        )
     if file_record.atmos_detected:
         return (
             None,
@@ -288,9 +363,7 @@ def _build_move_for_file(
                 matched_file_ids=[file_record.id],
             ),
         )
-    if config.paths.atmos_dir is not None and _is_path_within(
-        source_path, config.paths.atmos_dir
-    ):
+    if config.paths.atmos_dir is not None and _is_path_within(source_path, config.paths.atmos_dir):
         return (
             None,
             _candidate_low_confidence(
@@ -300,8 +373,7 @@ def _build_move_for_file(
             ),
         )
     if not any(
-        _is_path_within(source_path, library_root)
-        for library_root in config.paths.library_roots
+        _is_path_within(source_path, library_root) for library_root in config.paths.library_roots
     ):
         return (
             None,
@@ -328,6 +400,15 @@ def _build_move_for_file(
             planned_action_at=_safe_datetime(candidate.planned_action_at),
             object_type=candidate.object_type,
             object_id=candidate.object_id,
+            explanation={
+                "rule_id": candidate.rule_id,
+                "source": candidate.source,
+                "candidate_reason": candidate.reason,
+                "matched_artist": file_record.artist,
+                "matched_album": file_record.album,
+                "matched_title": file_record.title,
+                "matched_track_number": file_record.track_number,
+            },
         ),
         None,
     )
@@ -354,6 +435,7 @@ def _plan_for_candidate(
     moves: list[QuarantineMovePlan] = []
     for file_record in resolved_files:
         move, low_conf = _build_move_for_file(
+            session,
             candidate,
             file_record,
             config,
@@ -413,9 +495,7 @@ def build_plan(
             date_folder=date_folder,
         )
         low_confidence.extend(candidate_low_conf)
-        candidate_moves = [
-            move for move in candidate_moves if move.file_id not in planned_file_ids
-        ]
+        candidate_moves = [move for move in candidate_moves if move.file_id not in planned_file_ids]
         if not candidate_moves:
             continue
         planned_file_ids.update(move.file_id for move in candidate_moves)
@@ -427,9 +507,209 @@ def build_plan(
             target_bucket = blocked_quarantine_future
         target_bucket.extend(candidate_moves)
 
+    soft_candidates = _build_soft_candidates(
+        session=session,
+        config=config,
+        now=current_time,
+        planned_file_ids=planned_file_ids,
+    )
+
     return Plan(
         atmos_moves=atmos_moves,
         blocked_quarantine_due=blocked_quarantine_due,
         blocked_quarantine_future=blocked_quarantine_future,
         low_confidence=low_confidence,
+        soft_candidates=soft_candidates,
+    )
+
+
+def _build_soft_candidates(
+    session: Session,
+    config: HsajConfig,
+    *,
+    now: datetime,
+    planned_file_ids: set[int],
+) -> list[SoftCandidatePlan]:
+    if not config.policy.enable_behavior_scoring:
+        return []
+
+    files = session.scalars(select(File).order_by(File.id.asc())).all()
+    play_signatures = {
+        (
+            (entry.artist or "").casefold(),
+            (entry.album or "").casefold(),
+            (entry.title or "").casefold(),
+        )
+        for entry in session.scalars(select(PlayHistory)).all()
+    }
+
+    duplicate_groups: dict[tuple[str, str, str, int | None], list[File]] = {}
+    for file_record in files:
+        key = (
+            (file_record.artist or "").casefold(),
+            (file_record.album or "").casefold(),
+            (file_record.title or "").casefold(),
+            file_record.track_number,
+        )
+        duplicate_groups.setdefault(key, []).append(file_record)
+
+    duplicate_losers: dict[int, dict[str, object]] = {}
+    for group in duplicate_groups.values():
+        if len(group) < 2:
+            continue
+        ranked = sorted(
+            group,
+            key=lambda item: (
+                -FORMAT_RANK.get((item.format or "").casefold(), 0),
+                -(item.size_bytes or 0),
+                item.id,
+            ),
+        )
+        winner = ranked[0]
+        for loser in ranked[1:]:
+            duplicate_losers[loser.id] = {
+                "winner_file_id": winner.id,
+                "winner_path": winner.path,
+                "winner_format": winner.format,
+                "loser_format": loser.format,
+            }
+
+    soft_candidates: list[SoftCandidatePlan] = []
+    for file_record in files:
+        if file_record.id in planned_file_ids:
+            continue
+        source_path = Path(file_record.path)
+        if not source_path.exists():
+            continue
+        if file_record.atmos_detected:
+            continue
+        if config.paths.quarantine_dir is not None and _is_path_within(
+            source_path, config.paths.quarantine_dir
+        ):
+            continue
+        if match_file_exemption(session, file_record) is not None:
+            continue
+
+        duplicate_evidence = duplicate_losers.get(file_record.id)
+        if duplicate_evidence is not None:
+            soft_candidates.append(
+                SoftCandidatePlan(
+                    file_id=file_record.id,
+                    source=source_path,
+                    reason="duplicate_lower_quality",
+                    evidence=duplicate_evidence,
+                )
+            )
+            continue
+
+        signature = (
+            (file_record.artist or "").casefold(),
+            (file_record.album or "").casefold(),
+            (file_record.title or "").casefold(),
+        )
+        if (
+            file_record.mtime is not None
+            and signature not in play_signatures
+            and (now - file_record.mtime).days >= config.policy.soft_never_played_days
+        ):
+            soft_candidates.append(
+                SoftCandidatePlan(
+                    file_id=file_record.id,
+                    source=source_path,
+                    reason="never_played_old",
+                    evidence={"age_days": (now - file_record.mtime).days},
+                )
+            )
+            continue
+
+        if config.paths.inbox_dir is not None and _is_path_within(
+            source_path, config.paths.inbox_dir
+        ):
+            age_days = (now - (file_record.mtime or now)).days
+            if age_days >= config.policy.soft_inbox_days:
+                soft_candidates.append(
+                    SoftCandidatePlan(
+                        file_id=file_record.id,
+                        source=source_path,
+                        reason="stale_inbox",
+                        evidence={"age_days": age_days},
+                    )
+                )
+
+    return soft_candidates
+
+
+def plan_from_dict(payload: dict[str, object]) -> Plan:
+    return Plan(
+        atmos_moves=[
+            AtmosMovePlan(
+                file_id=int(item["file_id"]),
+                source=Path(str(item["source"])),
+                destination=Path(str(item["destination"])),
+                artist=item.get("artist"),
+                album=item.get("album"),
+            )
+            for item in payload.get("atmos_moves", [])
+        ],
+        blocked_quarantine_due=[
+            QuarantineMovePlan(
+                candidate_id=int(item["candidate_id"]),
+                file_id=int(item["file_id"]),
+                source=Path(str(item["source"])),
+                destination=Path(str(item["destination"])),
+                reason=str(item["reason"]),
+                planned_action_at=(
+                    ensure_utc(datetime.fromisoformat(item["planned_action_at"]))
+                    if item.get("planned_action_at")
+                    else None
+                ),
+                object_type=str(item["object_type"]),
+                object_id=str(item["object_id"]),
+                explanation=dict(item.get("explanation", {})),
+            )
+            for item in payload.get("blocked_quarantine_due", [])
+        ],
+        blocked_quarantine_future=[
+            QuarantineMovePlan(
+                candidate_id=int(item["candidate_id"]),
+                file_id=int(item["file_id"]),
+                source=Path(str(item["source"])),
+                destination=Path(str(item["destination"])),
+                reason=str(item["reason"]),
+                planned_action_at=(
+                    ensure_utc(datetime.fromisoformat(item["planned_action_at"]))
+                    if item.get("planned_action_at")
+                    else None
+                ),
+                object_type=str(item["object_type"]),
+                object_id=str(item["object_id"]),
+                explanation=dict(item.get("explanation", {})),
+            )
+            for item in payload.get("blocked_quarantine_future", [])
+        ],
+        low_confidence=[
+            LowConfidencePlan(
+                candidate_id=int(item["candidate_id"]),
+                object_type=str(item["object_type"]),
+                object_id=str(item["object_id"]),
+                planned_action_at=(
+                    ensure_utc(datetime.fromisoformat(item["planned_action_at"]))
+                    if item.get("planned_action_at")
+                    else None
+                ),
+                reason=str(item["reason"]),
+                matched_file_ids=[int(value) for value in item.get("matched_file_ids", [])],
+                explanation=dict(item.get("explanation", {})),
+            )
+            for item in payload.get("low_confidence", [])
+        ],
+        soft_candidates=[
+            SoftCandidatePlan(
+                file_id=int(item["file_id"]),
+                source=Path(str(item["source"])),
+                reason=str(item["reason"]),
+                evidence=dict(item.get("evidence", {})),
+            )
+            for item in payload.get("soft_candidates", [])
+        ],
     )
