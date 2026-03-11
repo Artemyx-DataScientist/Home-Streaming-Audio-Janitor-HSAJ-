@@ -1,134 +1,109 @@
-# Сопоставление `DESIGN.md` и текущей реализации HSAJ
+# Design vs Implementation Matrix for HSAJ
 
-## Источники и обозначения
+## Scope
 
-- Источник ожиданий: `DESIGN.md`.
-- Источник факта: runtime-код в `bridge/` и `core/`.
-- Тесты используются как вторичное подтверждение поведения, но не подменяют runtime-реализацию.
-- Метки в доказательствах:
-  - `[runtime]` — поведение видно в исполняемом коде.
-  - `[test]` — поведение подтверждено тестом.
-  - `[README]` — поведение заявлено в документации, но не обязательно обеспечено runtime-кодом.
+This document compares the target design in `DESIGN.md` with the current runtime implementation in:
 
-## 1. Сводная матрица
+- `bridge/src/`
+- `core/src/hsaj/`
+- `configs/hsaj.example.yaml`
 
-| Раздел дизайна | Ожидание | Факт в коде | Статус | Доказательства | Комментарий/разрыв |
-| --- | --- | --- | --- | --- | --- |
-| `0. Краткая идея` | Система следит за библиотекой, получает сигналы от Roon, выделяет Atmos, готовит удаление, а истина живёт в FS + своей БД. | Базовый контур есть: `scan` пишет метаданные в SQLite, bridge шлёт transport events, planner строит план Atmos/quarantine, executor перемещает файлы и пишет audit log. | `Частично реализовано` | `DESIGN.md:5-15`; [runtime] `core/src/hsaj/scanner.py:184-216`; [runtime] `core/src/hsaj/db/models.py:37-179`; [runtime] `core/src/hsaj/planner.py:216-271`; [runtime] `core/src/hsaj/executor.py:151-190`; [runtime] `bridge/src/index.js:255-410` | Общая идея MVP реализована, но “находит мусор и дубли”, полноценные blocked-сигналы и пользовательские сигналы Roon пока не доведены до end-to-end состояния. |
-| `1. Цели и не-цели` | Автоматизировать уборку, защищать Atmos и favorites/whitelist, уважать блоки Roon, делать действия обратимыми, не писать свой плеер и не лезть в БД Roon. | Система не является плеером, работает через bridge и transport API Roon, Atmos переносится отдельно, quarantine/restore обратимы. Favorites/whitelist и inbox-автораскладка отсутствуют. | `Частично реализовано` | `DESIGN.md:23-42`; [runtime] `bridge/src/index.js:356-387`; [runtime] `core/src/hsaj/atmos.py:131-205`; [runtime] `core/src/hsaj/executor.py:106-148`; [runtime] `core/src/hsaj/executor.py:211-298`; [test] `core/tests/test_planner_executor.py:123-247` | Не-цели соблюдены лучше, чем цели: reversible quarantine уже есть, а favorites/whitelist и “заливка в /inbox” пока отсутствуют. |
-| `2. Архитектура компонентов` | File Scanner + Roon Integration Layer + Core + Action Executor + CLI/Web UI. | Компоненты есть как отдельные модули и процессы: `bridge/src/index.js`, `scanner.py`, `blocking.py`, `planner.py`, `executor.py`, `transport.py`, `cli.py`. Веб-интерфейса и core HTTP API нет. | `Частично реализовано` | `DESIGN.md:48-95`; [runtime] `bridge/src/index.js:255-410`; [runtime] `core/src/hsaj/scanner.py:184-216`; [runtime] `core/src/hsaj/blocking.py:163-244`; [runtime] `core/src/hsaj/planner.py:216-271`; [runtime] `core/src/hsaj/executor.py:151-190`; [runtime] `core/src/hsaj/cli.py:33-351` | Архитектурное разделение уже похоже на драфт, но scanner и bridge проще задуманного, а “веб-интерфейс/FastAPI” пока не начинался. |
-| `3. Источники данных и истина` | FS — истина о файлах, Roon — истина о пользовательских решениях и поведении, локальная БД хранит `files`, `library_items`, `roon_blocks`, `block_candidates`, `play_history`, `actions_log`. | `files`, `play_history`, `actions_log`, `roon_blocks_raw`, `block_candidates`, `roon_items_cache` есть. `library_items`/`tracks` нет. FS-метаданные ограничены путём, размером, форматом, тегами и duration; каналов, bitrate и Atmos-флага в БД нет. | `Частично реализовано` | `DESIGN.md:101-135`; [runtime] `core/src/hsaj/db/models.py:37-179`; [runtime] `core/src/hsaj/scanner.py:80-110`; [runtime] `core/src/hsaj/transport.py:123-171` | Источник истины уже смещён в FS + SQLite, как и задумывалось, но модель данных пока упрощённая и не покрывает логические сущности библиотеки. |
-| `4. Логика блоков и удаления` | Наследование `artist -> album -> track`, таймер от `first_seen_at`, restore при снятии блока, pre-check перед действием, quarantine и опциональное auto-delete. | Таймер от `first_seen_at` и restore при повторном sync реализованы. Но planner реально умеет строить quarantine-план только для `track`, когда есть `RoonItemCache`; `artist`/`album` не разворачиваются в набор файлов. Pre-check ограничен проверкой факта существования файла и Atmos-каталога; whitelist и второй таймер удаления отсутствуют. | `Частично реализовано` | `DESIGN.md:141-187`; [runtime] `core/src/hsaj/blocking.py:70-205`; [test] `core/tests/test_blocking.py:18-120`; [runtime] `core/src/hsaj/planner.py:88-213`; [runtime] `core/src/hsaj/executor.py:106-190`; [test] `core/tests/test_planner_executor.py:89-200` | Самая большая функциональная дыра: дизайн описывает иерархическое наследование блоков, а текущий код работает как “прямые blocked objects + попытка сопоставить один track по метаданным”. |
-| `5. Работа с Dolby Atmos` | `ffprobe`-детекция по profile/tags, перенос в отдельный каталог, иммунитет от автоудаления. | Детекция через `ffprobe` по `stream.profile`, `stream.tags`, `format.tags` реализована. Planner строит `atmos_moves`, executor перемещает файл в `atmos_dir`, а quarantine-план не строится для файлов, уже лежащих внутри Atmos-каталога. | `Частично реализовано` | `DESIGN.md:193-213`; [runtime] `core/src/hsaj/atmos.py:21-96`; [runtime] `core/src/hsaj/atmos.py:117-205`; [runtime] `core/src/hsaj/planner.py:174-190`; [runtime] `core/src/hsaj/executor.py:72-103` | Политика реализована близко к драфту, но immunity проверяется по расположению в `atmos_dir`, а не по отдельному сохранённому Atmos-флагу в БД. |
-| `6. Поведенческий скоринг` | Soft-scoring по never played / age / likes / inbox age / duplicates, вывод в `soft_candidates`, без автоделита. | Отдельного behavior scoring нет. Поле `low_confidence` в плане — это не soft-scoring, а список кандидатов, которые не удалось уверенно сопоставить с файлом. | `Не реализовано` | `DESIGN.md:217-233`; [runtime] `core/src/hsaj/planner.py:31-46`; [runtime] `core/src/hsaj/planner.py:137-167`; [runtime] `core/src/hsaj/transport.py:123-171` | `play_history` уже собирается, но не используется для поведенческой аналитики, never-played логики, duplicate detection или ручного soft quarantine. |
-| `7. CLI / API` | `hsaj scan`, `hsaj sync-roon`, `hsaj plan`, `hsaj apply`, `hsaj history` и будущий web API: `/plan`, `/apply`, `/stats`, `/candidates`. | CLI уже даёт `scan`, `plan`, `apply`, `listen`, `restore`, `db init/status`, `roon sync`. Команда названа `hsaj roon sync`, а не `hsaj sync-roon`. `history` отсутствует. Core web API нет. Bridge предоставляет только `/health`, `/track/{id}`, `/blocked`, WS `/events`. | `Реализовано иначе` | `DESIGN.md:239-269`; [runtime] `core/src/hsaj/cli.py:95-351`; [runtime] `bridge/src/index.js:255-329`; [README] `README.md:41-45` | CLI в целом уже полезный, но интерфейс сдвинут в сторону namespace-команд, а web API реализован только как bridge API, не как HTTP-слой поверх core. |
-| `8. Технологический стек` | Python + FastAPI + SQLite, Node.js bridge, HTTP/WebSocket связь, `ffprobe`, `mutagen`. | Python 3.11+, SQLite/SQLAlchemy, Node.js bridge, WebSocket, `mutagen` и `ffprobe` действительно используются. FastAPI нет; CLI построен на Typer, bridge общается через Node HTTP server и WS. | `Реализовано иначе` | `DESIGN.md:275-284`; [runtime] `core/pyproject.toml:6-17`; [runtime] `bridge/package.json:6-19`; [runtime] `bridge/src/index.js:1-15`; [runtime] `core/src/hsaj/atmos.py:21-96`; [runtime] `core/src/hsaj/scanner.py:58-110` | Стек совпадает по базовым технологиям, но API-слой ушёл не в FastAPI, а в комбинацию Typer + минимальный Node HTTP/WS bridge. |
-| `9. Конфигурация` | `hsaj.toml`/`config.yaml` с путями, grace days, quarantine delete days, `auto_delete`, `enable_behavior_scoring`. | Реализован YAML-конфиг с `database` и `paths`: `library_roots`, `quarantine_dir`, `atmos_dir`, `inbox_dir`, scan options, `ffprobe_path`. Политические параметры (`block_grace_days`, `quarantine_delete_days`, `auto_delete`, `enable_behavior_scoring`) в конфиг не вынесены. Grace period пока задаётся CLI-флагом `--grace-days`. | `Реализовано иначе` | `DESIGN.md:288-303`; [runtime] `core/src/hsaj/config.py:21-178`; [runtime] `configs/hsaj.example.yaml:1-19`; [runtime] `core/src/hsaj/cli.py:293-315` | Конфиг уже рабочий, но он покрывает файловую инфраструктуру, а не policy-слой из дизайн-драфта. |
-| `10. Структура репозитория` | Примерная структура с `configs/`, `docs/decisions/ADR-*`, разложенным bridge на несколько модулей, `test/`, `scripts/`. | Верхнеуровневое разделение `bridge/`, `core/`, `configs/`, `docs/`, `adr/` есть, но bridge пока монолитен в `bridge/src/index.js`, ADR лежат в `adr/`, а не в `docs/decisions/`. | `Частично реализовано` | `DESIGN.md:306-340`; [runtime] фактические каталоги `bridge/`, `core/`, `configs/`, `docs/`, `adr/`; [runtime] `bridge/src/index.js`; [runtime] `README.md:3-5` | Структура движется в ту же сторону, но код ещё не разложен на более мелкие модули, которые предполагает драфт. |
+`DESIGN.md` is treated as the intended product direction. Runtime code is treated as the source of truth for what actually works today.
 
-## Сквозные интерфейсы
+## Summary
 
-- CLI:
-  - Есть `hsaj scan`, `hsaj plan`, `hsaj apply`, `hsaj listen`, `hsaj restore`, `hsaj roon sync`, `hsaj db init`, `hsaj db status`.
-  - Нет `hsaj history`.
-  - Доказательства: [runtime] `core/src/hsaj/cli.py:95-351`.
-- Bridge HTTP/WebSocket API:
-  - Есть `GET /health`, `GET /track/{id}`, `GET /blocked`, WebSocket `/events`.
-  - `/blocked` сейчас технически присутствует, но по умолчанию возвращает `501`, потому что provider передаётся как `() => null`.
-  - Доказательства: [runtime] `bridge/src/index.js:255-329`; [runtime] `bridge/src/index.js:391-405`.
-- SQLite-модели:
-  - Есть `files`, `actions_log`, `play_history`, `roon_items_cache`, `roon_blocks_raw`, `block_candidates`.
-  - Нет `library_items` и отдельной логической модели album/artist/track.
-  - Доказательства: [runtime] `core/src/hsaj/db/models.py:37-179`.
-- Файловые операции:
-  - Есть scan/upsert, Atmos move, quarantine move, restore.
-  - Нет физического auto-delete после второго таймера.
-  - Доказательства: [runtime] `core/src/hsaj/scanner.py:184-268`; [runtime] `core/src/hsaj/atmos.py:131-205`; [runtime] `core/src/hsaj/executor.py:72-190`; [runtime] `core/src/hsaj/executor.py:211-298`.
+The project already implements a usable MVP around four core flows:
 
-## 2. Детальный разбор ключевых расхождений
+- library scan into SQLite
+- bridge transport events into `play_history`
+- Atmos detection and relocation
+- quarantine planning, apply, and restore
 
-### 2.1. Иерархия блокировок `artist -> album -> track`
+The largest gaps are still in the "smart cleanup" part of the draft:
 
-Дизайн предполагает каскадное наследование блоков и приоритет `track > album > artist` (`DESIGN.md:141-157`). Текущий код хранит `object_type` и `object_id` для каждого blocked object, но не разворачивает `artist` и `album` в набор файлов.
+- blocked flow depends on an external `/blocked` feed instead of a real Roon blocked API
+- artist and album blocks are resolved by direct metadata matching, not by a richer library object graph
+- behavior scoring and duplicate quality logic are still not implemented
+- there is no core HTTP API or web UI
+- quarantine hard delete is configured, but not executed anywhere
 
-- `sync_blocked_objects()` просто создаёт или обновляет `BlockCandidate` с той же парой `object_type/object_id`, не вычисляя дочерние сущности: [runtime] `core/src/hsaj/blocking.py:163-205`.
-- `_load_cached_track()` в planner работает только для `candidate.object_type == "track"`: [runtime] `core/src/hsaj/planner.py:88-103`.
-- Если cached track отсутствует или сопоставление неоднозначно, кандидат попадает в `low_confidence`, а не в quarantine-план: [runtime] `core/src/hsaj/planner.py:137-167`.
+## Matrix
 
-Практический эффект: дизайн обещает, что блокировка артиста/альбома приведёт к конкретным кандидатам на вынос, а текущая реализация по runtime-коду такого пути не содержит.
+| Design area | Draft expectation | Current implementation | Status | Notes |
+| --- | --- | --- | --- | --- |
+| Core product idea | Scan library, listen to Roon, protect Atmos, quarantine unwanted files, keep truth in FS + local DB | Implemented as `scan`, bridge WS transport events, Atmos moves, quarantine planning/apply, restore, SQLite models | Partial | MVP exists, but "trash detection", duplicate logic, and complete blocked integration are still incomplete |
+| Component split | Separate scanner, Roon integration layer, core policy engine, action executor, CLI, future web UI | Split into `bridge/` and `core/`; core is further separated into scanner, blocking, planner, executor, transport, DB, CLI | Partial | Architectural direction matches the draft; no core HTTP API or web UI yet |
+| Source of truth | Filesystem for file facts, Roon for user intent, SQLite for normalized state | `files`, `play_history`, `actions_log`, `roon_blocks_raw`, `block_candidates`, `roon_items_cache` exist in SQLite | Partial | Local DB is real, but there is still no `library_items` abstraction for artist/album/track entities |
+| File scanning | Read tags, format, duration, Atmos state, store in SQLite | Scanner reads tags via `mutagen`, duration via `mutagen`, Atmos via `ffprobe`, stores `atmos_detected` in `files` | Implemented | The DB model now stores Atmos state directly, which is slightly ahead of the original matrix doc |
+| Roon integration | Bridge should expose blocked state and playback behavior to the core | Bridge exposes `/health`, `/track/{id}`, `/blocked`, and WS `/events` | Partial | Transport flow works. `/blocked` works only when `BRIDGE_BLOCKED_JSON` or `BRIDGE_BLOCKED_FILE` is configured |
+| Block inheritance | Track, album, and artist blocks should cascade with `track > album > artist` priority | Planner sorts by `track`, `album`, `artist` priority and resolves each candidate into file matches | Partial | There is no richer inheritance graph; album and artist handling is based on exact metadata matches in `files` |
+| First-seen timer | Grace timer starts when HSAJ first sees a block | `first_seen_at`, `last_seen_at`, and `planned_action_at` are persisted and preserved on later syncs | Implemented | This part matches the design well |
+| Restore flow | Removing a block should cancel action; quarantined files should be reversible | Candidates are marked `restored` when a block disappears; quarantine restore is implemented with audit logs | Implemented | Reversibility is already one of the strongest parts of the system |
+| Pre-action validation | Re-check blocked state, Atmos immunity, whitelist/favorites, then quarantine | Planner prevents Atmos items from being quarantined; executor checks file existence and current status | Partial | No whitelist/favorites. No second blocked-state revalidation at apply time |
+| Atmos policy | Detect Atmos with `ffprobe`, move to dedicated root, never auto-delete | Implemented in `atmos.py`, planned in `planner.py`, executed in `executor.py` | Implemented | Current code stores `atmos_detected` and also protects files already under `atmos_dir` |
+| Behavior scoring | Build soft candidates from history, age, likes, inbox age, duplicates | `play_history` exists, but planner does not use it for scoring | Not implemented | `enable_behavior_scoring` exists in config as a placeholder only |
+| CLI surface | `scan`, `sync-roon`, `plan`, `apply`, `history` | `scan`, `plan`, `apply`, `history`, `listen`, `restore`, `db init`, `db status`, `roon sync` | Implemented differently | The CLI is richer than the draft, but naming changed to `hsaj roon sync` |
+| Core API / UI | Future `GET /plan`, `POST /apply`, `GET /stats`, `GET /candidates` | No core HTTP API and no web UI | Not implemented | Only the bridge exposes HTTP and WebSocket endpoints |
+| Config | Paths, grace days, quarantine delete days, auto-delete, behavior scoring | YAML config now includes `database`, `paths`, and `policy` sections | Implemented | Config support is ahead of the previous comparison doc; policy settings are already modeled |
+| Hard delete | Optional delete after quarantine retention period | `quarantine_delete_days` and `auto_delete` exist in config, but executor never performs timed deletion | Not implemented | Config is there, behavior is not |
+| Repo structure | Split `bridge`, `core`, `configs`, ADRs, tests, scripts | Top-level structure is present; core is modular; bridge is still mostly concentrated in `bridge/src/index.js` | Partial | Repository shape follows the draft, but bridge has not yet been decomposed into smaller modules |
 
-### 2.2. Таймеры, pre-check и restore-логика
+## What Matches Well Today
 
-В части `first_seen_at` текущая реализация уже хорошо совпадает с драфтом.
+- `core/src/hsaj/scanner.py` scans the library and upserts file metadata into SQLite.
+- `core/src/hsaj/transport.py` consumes bridge transport events and writes `play_history`.
+- `core/src/hsaj/atmos.py` detects Atmos via `ffprobe` metadata and plans moves into `atmos_dir`.
+- `core/src/hsaj/planner.py` builds both Atmos and quarantine plans.
+- `core/src/hsaj/executor.py` applies Atmos and quarantine moves and supports restore from quarantine.
+- `core/src/hsaj/config.py` now models both path settings and policy settings from the draft.
 
-- `upsert_raw_block()` и `upsert_block_candidate()` сохраняют `first_seen_at`, обновляют `last_seen_at` и не сдвигают `planned_action_at` при повторном sync: [runtime] `core/src/hsaj/blocking.py:70-136`; [test] `core/tests/test_blocking.py:63-90`.
-- При исчезновении blocked object кандидат переводится в `restored`, а `planned_action_at` очищается: [runtime] `core/src/hsaj/blocking.py:139-160`; [test] `core/tests/test_blocking.py:93-120`.
-- После quarantine есть явный restore flow с логированием конфликта и возвратом файла назад: [runtime] `core/src/hsaj/executor.py:201-298`; [test] `core/tests/test_planner_executor.py:203-247`.
+## Most Important Gaps
 
-Но политика pre-check из дизайна реализована лишь частично:
+### 1. Blocked flow is still only partially real
 
-- нет whitelist/favorites-проверки;
-- нет повторной валидации blocked state в момент `apply`;
-- нет второго таймера `delete_after` и физического удаления старых quarantine-файлов.
+The draft assumes a reliable Roon-driven blocked signal. In practice, the bridge only serves `/blocked` from:
 
-Иными словами, reversible-часть уже существует, а hard-delete policy пока нет.
+- `BRIDGE_BLOCKED_JSON`
+- `BRIDGE_BLOCKED_FILE`
 
-### 2.3. Soft-scoring и “вторая линия обороны”
+That makes blocked sync operational for demos and controlled environments, but not fully coupled to live Roon block state yet.
 
-Раздел `DESIGN.md:217-233` пока не реализован.
+### 2. Album and artist blocks are heuristic, not model-driven
 
-- `play_history` действительно собирается из transport events: [runtime] `core/src/hsaj/transport.py:123-171`; [test] `core/tests/test_transport.py:47-115`.
-- Но planner не использует `play_history`, возраст файлов, likes/tags, inbox age или качество дублей для формирования `soft_candidates`.
-- Текущее поле `low_confidence` не равно soft-scoring: это технический список кандидатов, которые не удалось связать с одним файлом по metadata match: [runtime] `core/src/hsaj/planner.py:31-46`; [runtime] `core/src/hsaj/planner.py:153-167`.
+The design suggests a richer library model where artist and album blocks expand naturally into concrete files. Current planner behavior is simpler:
 
-Практический эффект: сегодня система умеет собирать события прослушивания, но ещё не использует их для product-level решений об уборке библиотеки.
+- track blocks use Roon metadata or cached track metadata
+- album blocks match `File.album` and optionally `File.artist`
+- artist blocks match `File.artist`
 
-### 2.4. Web API “на будущее”
+This works for straightforward metadata, but it is not the same as a dedicated `library_items` graph with explicit inheritance semantics.
 
-В design draft web API относится к ядру HSAJ: `GET /plan`, `POST /apply`, `GET /stats`, `GET /candidates` (`DESIGN.md:262-269`). Сейчас этого слоя нет.
+### 3. Smart cleanup logic is still mostly future work
 
-- Core предоставляет только CLI-команды: [runtime] `core/src/hsaj/cli.py:128-351`.
-- HTTP/WS API есть только у bridge и заточен под transport-события и наблюдаемые треки: [runtime] `bridge/src/index.js:255-329`.
+The draft spends significant effort on soft scoring and duplicate handling. Current runtime code does not yet:
 
-Это не просто “не всё доделано”, а именно другая граница ответственности: bridge уже наружу торчит, core пока остаётся локальным CLI/worker.
+- derive `soft_candidates`
+- rank by never-played history
+- compare duplicate quality
+- use likes, tags, or inbox age
 
-### 2.5. Полнота Roon blocked integration
+So the implemented system is stronger at safe movement and auditability than at automatic decision-making.
 
-Именно этот участок сейчас наиболее слабый end-to-end.
+### 4. Quarantine retention policy is modeled, but not executed
 
-- Bridge объявляет `GET /blocked`, но при текущей wiring-конфигурации отдаёт `501 Not Implemented`: [runtime] `bridge/src/index.js:269-275`; [runtime] `bridge/src/index.js:396-402`; [README] `README.md:41-45`.
-- `hsaj roon sync` жёстко зависит от `/blocked`: [runtime] `core/src/hsaj/cli.py:293-344`; [runtime] `core/src/hsaj/blocking.py:208-244`.
-- Bridge умеет отдавать `/track/{id}`, но трековые идентификаторы там синтезируются из zone/title/artist/album/duration, а не берутся из явного Roon blocked API: [runtime] `bridge/src/index.js:79-83`; [runtime] `bridge/src/index.js:97-140`; [runtime] `bridge/src/index.js:243-245`.
+The config already includes:
 
-Практический эффект: transport/history flow уже рабочий, а blocked sync остаётся частично каркасным и пока не выглядит полноценно замкнутым на реальный источник blocked objects.
+- `policy.quarantine_delete_days`
+- `policy.auto_delete`
 
-## 3. Вывод по зрелости реализации
+But there is no worker or executor path that deletes files after the retention period. The system currently stops at quarantine plus manual restore.
 
-### Что уже образует рабочий MVP
+## Bottom Line
 
-- Разделение на bridge и core уже материализовано.
-- Библиотечный scan с записью в SQLite работает.
-- Transport events из Roon bridge попадают в `play_history`.
-- Atmos detection и перенос в отдельный каталог реализованы.
-- Планирование quarantine и фактическое перемещение файлов реализованы.
-- Restore из quarantine и audit logging уже есть.
+The implementation is no longer just a skeleton. It already delivers a practical MVP for scanning, Atmos handling, transport history, quarantine planning, applying moves, and restoring mistakes.
 
-### Что пока остаётся концептом из дизайн-драфта
+The codebase still falls short of the full product promise in `DESIGN.md` mostly in three places:
 
-- Наследование блокировок от artist/album к конкретным файлам.
-- Рабочий источник blocked/banned/hidden данных из bridge.
-- Favorites/whitelist.
-- Поведенческий soft-scoring и duplicate quality logic.
-- Core HTTP API / веб-слой.
-- Второй таймер и auto-delete из quarantine.
-- Логическая модель `library_items`/`tracks`.
-
-### Самые важные расхождения для пользовательского поведения
-
-1. Пользовательский blocked flow из дизайна не замкнут end-to-end: bridge не поставляет реальные blocked objects по `/blocked`, а core без этого не может синхронизировать блокировки.
-2. Даже если blocked objects появятся, planner по runtime-коду уверенно обрабатывает только `track`-кандидатов, а не иерархию `artist/album`.
-3. Система уже хорошо справляется с Atmos/quarantine/history, но “интеллект уборки” из design draft пока почти полностью отсутствует.
-
-### Общая оценка
-
-Текущая кодовая база больше всего похожа на ранний, но уже полезный MVP вокруг четырёх потоков: `scan`, `listen transport`, `plan/apply quarantine`, `Atmos move`. Она следует архитектурному направлению `DESIGN.md`, но пока реализует только “жёсткое ядро” санитарного конвейера, а не весь продуктовый объём, описанный в драфте.
+1. real end-to-end blocked integration
+2. smarter candidate generation beyond explicit blocks
+3. automation after quarantine retention
