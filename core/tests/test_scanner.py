@@ -44,6 +44,7 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
         engine=engine,
         library_roots=[library_root],
         dry_run=False,
+        atmos_detection_fn=lambda _: False,
     )
 
     assert summary_first.found_files == 1
@@ -56,6 +57,7 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
         assert stored.title == "Test Title"
         assert stored.track_number == 1
         assert stored.year == 2024
+        assert stored.atmos_detected is False
         first_mtime = stored.mtime
 
     new_mtime = datetime.now(tz=timezone.utc) + timedelta(hours=1)
@@ -67,6 +69,7 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
         engine=engine,
         library_roots=[library_root],
         dry_run=False,
+        atmos_detection_fn=lambda _: False,
     )
 
     assert summary_second.found_files == 1
@@ -88,6 +91,7 @@ def test_scan_handles_file_without_tags_when_extension_is_allowed(tmp_path: Path
         library_roots=[library_root],
         allowed_extensions=["bin"],
         dry_run=False,
+        atmos_detection_fn=lambda _: False,
     )
 
     assert summary.found_files == 1
@@ -115,6 +119,7 @@ def test_scan_skips_excluded_directories(tmp_path: Path) -> None:
         excluded_dirs=[excluded],
         batch_size=1,
         dry_run=False,
+        atmos_detection_fn=lambda _: False,
     )
 
     assert summary.found_files == 1
@@ -122,3 +127,23 @@ def test_scan_skips_excluded_directories(tmp_path: Path) -> None:
         stored = session.scalars(select(File)).all()
         assert len(stored) == 1
         assert stored[0].path.endswith("included\\track.mp3")
+
+
+def test_scan_persists_atmos_detection(tmp_path: Path) -> None:
+    engine = _prepare_db(tmp_path)
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    file_path = library_root / "track.mp3"
+    _create_id3_file(file_path)
+
+    summary = scan_library(
+        engine=engine,
+        library_roots=[library_root],
+        dry_run=False,
+        atmos_detection_fn=lambda path: path == file_path.resolve(),
+    )
+
+    assert summary.created == 1
+    with Session(engine) as session:
+        stored = session.execute(select(File)).scalar_one()
+        assert stored.atmos_detected is True

@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from mutagen import File
 from mutagen.easyid3 import EasyID3
@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from .atmos import is_atmos
 from .db.models import File as FileModel
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class FileMetadata:
     track_number: int | None
     year: int | None
     duration_seconds: int | None
+    atmos_detected: bool
 
 
 @dataclass(slots=True)
@@ -77,7 +79,12 @@ def _extract_tags(path: Path) -> dict[str, str | list[str] | None]:
     return dict(audio.tags)
 
 
-def _extract_metadata(path: Path) -> FileMetadata:
+def _extract_metadata(
+    path: Path,
+    *,
+    ffprobe_path: str = "ffprobe",
+    atmos_detection_fn: Callable[[Path], bool] | None = None,
+) -> FileMetadata:
     stat = path.stat()
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
@@ -96,6 +103,10 @@ def _extract_metadata(path: Path) -> FileMetadata:
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Could not read duration for %s: %s", path, exc)
 
+    detection = atmos_detection_fn or (
+        lambda target: is_atmos(target, ffprobe_path=ffprobe_path)
+    )
+
     return FileMetadata(
         path=path.resolve(),
         size_bytes=stat.st_size,
@@ -107,6 +118,7 @@ def _extract_metadata(path: Path) -> FileMetadata:
         track_number=_parse_int(tags.get("tracknumber")),
         year=_parse_int(tags.get("date") or tags.get("year")),
         duration_seconds=duration_seconds,
+        atmos_detected=detection(path.resolve()),
     )
 
 
@@ -188,6 +200,8 @@ def scan_library(
     excluded_dirs: Sequence[Path] = (),
     batch_size: int = 200,
     dry_run: bool = False,
+    ffprobe_path: str = "ffprobe",
+    atmos_detection_fn: Callable[[Path], bool] | None = None,
 ) -> ScanSummary:
     summary = ScanSummary()
 
@@ -205,7 +219,11 @@ def scan_library(
     with Session(engine) as session:
         for file_path in file_iter:
             summary.found_files += 1
-            metadata = _extract_metadata(file_path)
+            metadata = _extract_metadata(
+                file_path,
+                ffprobe_path=ffprobe_path,
+                atmos_detection_fn=atmos_detection_fn,
+            )
             summary = _upsert_file(session=session, metadata=metadata, summary=summary)
             pending += 1
             if pending >= batch_size:
@@ -235,6 +253,7 @@ def _upsert_file(
                 track_number=metadata.track_number,
                 year=metadata.year,
                 duration_seconds=metadata.duration_seconds,
+                atmos_detected=metadata.atmos_detected,
             )
         )
         summary.created += 1
@@ -253,6 +272,7 @@ def _upsert_file(
     updated |= _assign_if_changed(
         existing, "duration_seconds", metadata.duration_seconds
     )
+    updated |= _assign_if_changed(existing, "atmos_detected", metadata.atmos_detected)
 
     if updated:
         summary.updated += 1

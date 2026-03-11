@@ -137,6 +137,31 @@ class PathsConfig(BaseModel):
         return str(Path(cleaned).expanduser())
 
 
+class PolicyConfig(BaseModel):
+    """Domain policy settings used by planning and cleanup commands."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_grace_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days to wait after first seeing a block before quarantine is due.",
+    )
+    quarantine_delete_days: int = Field(
+        default=60,
+        ge=0,
+        description="Days to keep files in quarantine before optional hard delete.",
+    )
+    auto_delete: bool = Field(
+        default=False,
+        description="Whether files should be deleted automatically after quarantine expiry.",
+    )
+    enable_behavior_scoring: bool = Field(
+        default=True,
+        description="Reserved flag for future soft-scoring heuristics.",
+    )
+
+
 class HsajConfig(BaseModel):
     """Root HSAJ config model."""
 
@@ -144,6 +169,7 @@ class HsajConfig(BaseModel):
 
     database: DatabaseConfig
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
 
     def resolve_relative_paths(self, base_path: Path) -> "HsajConfig":
         """Return a copy with paths resolved relative to the config file."""

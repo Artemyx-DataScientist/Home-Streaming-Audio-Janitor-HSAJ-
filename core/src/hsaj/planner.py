@@ -172,6 +172,20 @@ def _plan_for_candidate(
         return ([], [])
 
     source_path = Path(file_record.path)
+    if file_record.atmos_detected:
+        return (
+            [],
+            [
+                LowConfidencePlan(
+                    candidate_id=candidate.id,
+                    object_type=candidate.object_type,
+                    object_id=candidate.object_id,
+                    planned_action_at=_safe_datetime(candidate.planned_action_at),
+                    reason=f"{candidate.reason}:atmos_immune",
+                    matched_file_ids=[matched_file.file_id],
+                )
+            ],
+        )
     if config.paths.atmos_dir is not None and source_path.resolve().is_relative_to(
         config.paths.atmos_dir.resolve()
     ):

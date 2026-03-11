@@ -1,5 +1,3 @@
-﻿from __future__ import annotations
-
 # ruff: noqa: B008
 import asyncio
 import os
@@ -11,23 +9,15 @@ import typer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .blocking import (
-    BLOCK_GRACE_DAYS_DEFAULT,
-    fetch_blocked_from_bridge,
-    sync_blocked_objects,
-)
+from .blocking import fetch_blocked_from_bridge, sync_blocked_objects
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
-from .db.models import BlockCandidate, RoonItemCache
+from .db.models import BlockCandidate, PlayHistory, RoonItemCache
 from .executor import apply_plan, restore_from_quarantine
 from .planner import build_plan
-from .roon import (
-    BridgeClientError,
-    cache_roon_track,
-    fetch_track_from_bridge,
-)
+from .roon import BridgeClientError, cache_roon_track, fetch_track_from_bridge
 from .scanner import scan_library
-from .timeutils import utc_now
+from .timeutils import utc_isoformat, utc_now
 from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
 
 app = typer.Typer(help="HSAJ core CLI")
@@ -98,6 +88,7 @@ def db_init(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
 ) -> None:
@@ -113,6 +104,7 @@ def db_status(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
 ) -> None:
@@ -131,6 +123,7 @@ def scan_command(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
     dry_run: bool = typer.Option(
@@ -157,6 +150,7 @@ def scan_command(
         excluded_dirs=loaded.config.paths.scan_exclude_dirs,
         batch_size=loaded.config.paths.scan_batch_size,
         dry_run=dry_run,
+        ffprobe_path=loaded.config.paths.ffprobe_path,
     )
 
     if dry_run:
@@ -174,6 +168,7 @@ def plan_command(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
 ) -> None:
@@ -264,12 +259,62 @@ def apply_command(
     )
 
 
+@app.command("history", help="Show recent play_history entries")
+def history_command(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        is_flag=False,
+        help="Path to hsaj.yaml",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        is_flag=False,
+        min=1,
+        help="Maximum number of entries to show",
+    ),
+    open_only: bool = typer.Option(
+        False,
+        "--open-only",
+        help="Show only currently open playback entries",
+    ),
+) -> None:
+    resolved_path = _load_config_or_exit(config)
+    loaded = _read_config_or_exit(resolved_path)
+
+    engine, _ = init_database(loaded.config.database)
+    with Session(engine) as session:
+        query = select(PlayHistory).order_by(
+            PlayHistory.started_at.desc(),
+            PlayHistory.id.desc(),
+        )
+        if open_only:
+            query = query.where(PlayHistory.ended_at.is_(None))
+        entries = session.scalars(query.limit(limit)).all()
+
+    if not entries:
+        typer.echo("Play history is empty.")
+        return
+
+    for entry in entries:
+        started_at = utc_isoformat(entry.started_at) or "unknown"
+        ended_at = utc_isoformat(entry.ended_at) or "open"
+        typer.echo(
+            f"{started_at} -> {ended_at} "
+            f"track={entry.track_id} source={entry.source} "
+            f"quality={entry.quality or 'unknown'} played_ms={entry.played_ms or 0}"
+        )
+
+
 @app.command("listen", help="Connect to the bridge and collect playback events")
 def listen_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
 ) -> None:
@@ -296,16 +341,19 @@ def roon_sync_command(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
     bridge_url: Optional[str] = typer.Option(
         None,
         "--bridge-url",
+        is_flag=False,
         help="Bridge HTTP URL (default: HSAJ_BRIDGE_HTTP or http://localhost:8080)",
     ),
-    grace_days: int = typer.Option(
-        BLOCK_GRACE_DAYS_DEFAULT,
+    grace_days: Optional[int] = typer.Option(
+        None,
         "--grace-days",
+        is_flag=False,
         help="Days to wait after first seeing a block before action is due",
     ),
     cache_tracks: bool = typer.Option(
@@ -325,11 +373,16 @@ def roon_sync_command(
 
     engine, _ = init_database(loaded.config.database)
     cache_result = TrackCacheWarmupResult()
+    resolved_grace_days = (
+        loaded.config.policy.block_grace_days
+        if grace_days is None
+        else grace_days
+    )
     with Session(engine) as session:
         result = sync_blocked_objects(
             session=session,
             blocked_items=blocked,
-            grace_period_days=grace_days,
+            grace_period_days=resolved_grace_days,
             seen_at=utc_now(),
         )
 
@@ -358,6 +411,7 @@ def restore_command(
         None,
         "--config",
         "-c",
+        is_flag=False,
         help="Path to hsaj.yaml",
     ),
 ) -> None:

@@ -144,7 +144,7 @@ def plan_atmos_moves(
             continue
         if _is_inside_root(source_path, atmos_root):
             continue
-        if not detection_fn(source_path):
+        if not file_record.atmos_detected and not detection_fn(source_path):
             continue
 
         destination = build_atmos_destination(file_record, atmos_root).resolve()

@@ -20,6 +20,10 @@ paths:
   scan_exclude_dirs:
     - ./music/_tmp
   scan_batch_size: 50
+policy:
+  block_grace_days: 14
+  quarantine_delete_days: 90
+  auto_delete: true
 """
     )
 
@@ -37,6 +41,9 @@ paths:
         (config_path.parent / "music/_tmp").resolve()
     ]
     assert loaded.config.paths.scan_batch_size == 50
+    assert loaded.config.policy.block_grace_days == 14
+    assert loaded.config.policy.quarantine_delete_days == 90
+    assert loaded.config.policy.auto_delete is True
 
 
 def test_load_config_empty_file(tmp_path: Path) -> None:

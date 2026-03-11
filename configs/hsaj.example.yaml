@@ -20,3 +20,10 @@ paths:
     - /mnt/music/_incoming
     - /mnt/music/_tmp
   scan_batch_size: 200
+  ffprobe_path: ffprobe
+
+policy:
+  block_grace_days: 30
+  quarantine_delete_days: 60
+  auto_delete: false
+  enable_behavior_scoring: true

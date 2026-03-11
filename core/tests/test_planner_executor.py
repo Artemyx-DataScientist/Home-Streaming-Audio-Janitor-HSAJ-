@@ -200,6 +200,41 @@ def test_apply_plan_dry_run_logs_plan_and_dry_run(tmp_path: Path) -> None:
         assert not destination.exists()
 
 
+def test_plan_treats_stored_atmos_flag_as_immune(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        file_record = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track.flac",
+        )
+        file_record.atmos_detected = True
+        session.commit()
+        _cache_track(
+            session,
+            RoonTrack(
+                roon_track_id="track-1",
+                artist="Artist",
+                album="Album",
+                title="Title",
+                duration_ms=300_000,
+                track_number=1,
+            ),
+        )
+        candidate = _add_candidate(session)
+
+        plan = _build_plan(session, config)
+
+        assert plan.blocked_quarantine_due == []
+        assert len(plan.low_confidence) == 1
+        assert plan.low_confidence[0].candidate_id == candidate.id
+        assert plan.low_confidence[0].reason.endswith(":atmos_immune")
+        refreshed_file = session.get(File, file_record.id)
+        assert refreshed_file is not None
+        assert refreshed_file.atmos_detected is True
+
+
 def test_restore_handles_conflicts(tmp_path: Path) -> None:
     config = _base_config(tmp_path)
     engine, _ = init_database(config.database)

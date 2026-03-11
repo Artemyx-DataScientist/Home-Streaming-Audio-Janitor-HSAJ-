@@ -76,6 +76,23 @@ def _migration_v4(conn: Connection) -> None:
     BlockCandidate.__table__.create(bind=conn, checkfirst=True)
 
 
+def _migration_v5(conn: Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info(files)")).fetchall()
+    }
+    if "atmos_detected" in existing_columns:
+        return
+    conn.execute(
+        text(
+            """
+            ALTER TABLE files
+            ADD COLUMN atmos_detected BOOLEAN NOT NULL DEFAULT 0
+            """
+        )
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -96,6 +113,11 @@ MIGRATIONS: list[Migration] = [
         version="0004_blocking_pipeline",
         description="Добавление таблиц roon_blocks_raw и block_candidates",
         upgrade=_migration_v4,
+    ),
+    Migration(
+        version="0005_atmos_detected",
+        description="Добавление устойчивого Atmos-флага для files",
+        upgrade=_migration_v5,
     ),
 ]
 

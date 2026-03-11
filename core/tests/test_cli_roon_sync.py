@@ -1,12 +1,15 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from hsaj.blocking import BlockedObject, sync_blocked_objects
-from hsaj.cli import _warm_track_cache
+from hsaj.cli import _warm_track_cache, roon_sync_command
+from hsaj.config import DatabaseConfig
+from hsaj.db import init_database
 from hsaj.db.models import Base, BlockCandidate, RoonItemCache
 from hsaj.roon import BridgeClientError, RoonTrack
 
@@ -60,3 +63,43 @@ def test_warm_track_cache_warms_cache_and_survives_partial_failures(monkeypatch)
         ).all()
         assert cached_ids == ["track-1"]
         assert candidate_ids == ["track-1", "track-2"]
+
+
+def test_roon_sync_uses_policy_grace_days_from_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "hsaj.yaml"
+    db_path = tmp_path / "hsaj.db"
+    config_path.write_text(
+        f"""
+database:
+  driver: sqlite
+  path: {db_path.as_posix()}
+paths:
+  library_roots: []
+policy:
+  block_grace_days: 12
+""".strip()
+    )
+
+    seen_at = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "hsaj.cli.fetch_blocked_from_bridge",
+        lambda base_url=None: [
+            BlockedObject(object_type="track", object_id="track-9", label="Track 9")
+        ],
+    )
+    monkeypatch.setattr("hsaj.cli.utc_now", lambda: seen_at)
+
+    roon_sync_command(
+        config=config_path,
+        bridge_url=None,
+        grace_days=None,
+        cache_tracks=False,
+    )
+
+    engine, _ = init_database(DatabaseConfig(driver="sqlite", path=db_path))
+    with Session(engine) as session:
+        candidate = session.scalars(select(BlockCandidate)).one()
+        assert candidate.first_seen_at == seen_at
+        assert candidate.planned_action_at == datetime(2024, 2, 13, tzinfo=timezone.utc)
