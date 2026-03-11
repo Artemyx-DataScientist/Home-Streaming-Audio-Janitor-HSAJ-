@@ -41,7 +41,15 @@ def test_upsert_raw_block_preserves_first_seen() -> None:
 def test_sync_blocked_creates_candidate_with_planned_action() -> None:
     seen_at = datetime(2024, 2, 1, tzinfo=timezone.utc)
     grace_days = 10
-    blocked = [BlockedObject(object_type="album", object_id="a1", label="Album 1")]
+    blocked = [
+        BlockedObject(
+            object_type="album",
+            object_id="a1",
+            label="Album 1",
+            artist="Artist 1",
+            album="Album 1",
+        )
+    ]
 
     with _session() as session:
         result = sync_blocked_objects(
@@ -58,6 +66,10 @@ def test_sync_blocked_creates_candidate_with_planned_action() -> None:
         assert candidate.planned_action_at == seen_at + timedelta(days=grace_days)
         assert candidate.reason == "blocked_by_album"
         assert candidate.status == "planned"
+        assert candidate.metadata_json == (
+            '{"album": "Album 1", "artist": "Artist 1", '
+            '"duration_ms": null, "title": null, "track_number": null}'
+        )
 
 
 def test_sync_blocked_does_not_shift_planned_on_repeat_sync() -> None:

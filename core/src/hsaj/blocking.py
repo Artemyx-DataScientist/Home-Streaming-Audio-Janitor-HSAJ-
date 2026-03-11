@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .bridge_auth import build_bridge_headers
 from .db.models import BlockCandidate, RoonBlockRaw
-from .roon import BridgeClientError, DEFAULT_BRIDGE_HTTP_URL
+from .roon import DEFAULT_BRIDGE_HTTP_URL, BridgeClientError
 from .timeutils import ensure_utc, utc_now
 
 CandidateStatus = Literal["planned", "restored"]
@@ -26,6 +27,11 @@ class BlockedObject:
     object_type: str
     object_id: str
     label: str | None = None
+    artist: str | None = None
+    album: str | None = None
+    title: str | None = None
+    track_number: int | None = None
+    duration_ms: int | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "BlockedObject":
@@ -43,7 +49,26 @@ class BlockedObject:
             object_type=object_type_raw.lower(),
             object_id=object_id_raw,
             label=label or None,
+            artist=_normalize_string(payload.get("artist")),
+            album=_normalize_string(payload.get("album")),
+            title=_normalize_string(payload.get("title")),
+            track_number=_parse_optional_int(
+                payload.get("trackno") or payload.get("track_number")
+            ),
+            duration_ms=_parse_optional_int(payload.get("duration_ms")),
         )
+
+    def metadata_json(self) -> str | None:
+        payload = {
+            "artist": self.artist,
+            "album": self.album,
+            "title": self.title,
+            "track_number": self.track_number,
+            "duration_ms": self.duration_ms,
+        }
+        if not any(value is not None for value in payload.values()):
+            return None
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -83,6 +108,7 @@ def upsert_raw_block(
     normalized_seen = _normalize_datetime(seen_at)
     if existing:
         existing.label = blocked.label
+        existing.metadata_json = blocked.metadata_json()
         existing.last_seen_at = normalized_seen
         return existing, False
 
@@ -90,6 +116,7 @@ def upsert_raw_block(
         object_type=blocked.object_type,
         object_id=blocked.object_id,
         label=blocked.label,
+        metadata_json=blocked.metadata_json(),
         first_seen_at=normalized_seen,
         last_seen_at=normalized_seen,
     )
@@ -114,6 +141,7 @@ def upsert_block_candidate(
     normalized_seen = _normalize_datetime(seen_at)
     if existing:
         existing.label = blocked.label
+        existing.metadata_json = blocked.metadata_json()
         existing.reason = _reason_for(blocked)
         existing.last_seen_at = normalized_seen
         if existing.status == "restored":
@@ -126,6 +154,7 @@ def upsert_block_candidate(
         object_type=blocked.object_type,
         object_id=blocked.object_id,
         label=blocked.label,
+        metadata_json=blocked.metadata_json(),
         reason=_reason_for(blocked),
         status="planned",
         first_seen_at=normalized_seen,
@@ -231,8 +260,6 @@ def fetch_blocked_from_bridge(
     except (HTTPError, URLError, TimeoutError) as exc:
         raise BridgeClientError(f"Could not fetch /blocked: {exc}") from exc
 
-    import json
-
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:  # pragma: no cover - unexpected response
@@ -242,3 +269,19 @@ def fetch_blocked_from_bridge(
         raise BridgeClientError("Expected a JSON array from /blocked")
 
     return [BlockedObject.from_dict(item) for item in parsed]
+
+
+def _normalize_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise BridgeClientError(f"Could not parse integer value: {value}") from exc

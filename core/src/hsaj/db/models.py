@@ -141,6 +141,7 @@ class RoonBlockRaw(Base):
     object_type: Mapped[str] = mapped_column(String(32), nullable=False)
     object_id: Mapped[str] = mapped_column(String(512), nullable=False)
     label: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -166,6 +167,7 @@ class BlockCandidate(Base):
     object_type: Mapped[str] = mapped_column(String(32), nullable=False)
     object_id: Mapped[str] = mapped_column(String(512), nullable=False)
     label: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned")
     first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)

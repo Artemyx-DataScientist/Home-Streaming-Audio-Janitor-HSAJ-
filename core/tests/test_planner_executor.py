@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,7 +25,15 @@ def _base_config(tmp_path: Path) -> HsajConfig:
     )
 
 
-def _create_file(session: Session, path: Path) -> File:
+def _create_file(
+    session: Session,
+    path: Path,
+    *,
+    artist: str = "Artist",
+    album: str = "Album",
+    title: str = "Title",
+    track_number: int = 1,
+) -> File:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("content")
     file_record = File(
@@ -32,10 +41,10 @@ def _create_file(session: Session, path: Path) -> File:
         size_bytes=1,
         format="flac",
         mtime=datetime.now(timezone.utc),
-        artist="Artist",
-        album="Album",
-        title="Title",
-        track_number=1,
+        artist=artist,
+        album=album,
+        title=title,
+        track_number=track_number,
         year=2024,
         duration_seconds=300,
     )
@@ -49,11 +58,14 @@ def _add_candidate(
     *,
     object_type: str = "track",
     object_id: str = "track-1",
+    label: str | None = None,
+    metadata_json: str | None = None,
 ) -> BlockCandidate:
     candidate = BlockCandidate(
         object_type=object_type,
         object_id=object_id,
-        label=None,
+        label=label,
+        metadata_json=metadata_json,
         reason=f"blocked_by_{object_type}",
         status="planned",
         first_seen_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -233,6 +245,98 @@ def test_plan_treats_stored_atmos_flag_as_immune(tmp_path: Path) -> None:
         refreshed_file = session.get(File, file_record.id)
         assert refreshed_file is not None
         assert refreshed_file.atmos_detected is True
+
+
+def test_plan_resolves_album_candidate_to_multiple_files(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        first = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track-1.flac",
+            artist="Artist",
+            album="Album",
+            title="Track 1",
+            track_number=1,
+        )
+        second = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track-2.flac",
+            artist="Artist",
+            album="Album",
+            title="Track 2",
+            track_number=2,
+        )
+        _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Other/Album/other.flac",
+            artist="Other",
+            album="Album",
+            title="Other Track",
+            track_number=1,
+        )
+        _add_candidate(
+            session,
+            object_type="album",
+            object_id="album-1",
+            label="Artist - Album",
+            metadata_json=json.dumps({"artist": "Artist", "album": "Album"}),
+        )
+
+        plan = _build_plan(session, config)
+
+    assert sorted(move.file_id for move in plan.blocked_quarantine_due) == [
+        first.id,
+        second.id,
+    ]
+    assert plan.low_confidence == []
+
+
+def test_plan_prefers_track_over_album_and_artist(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        file_record = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track.flac",
+        )
+        _add_candidate(
+            session,
+            object_type="artist",
+            object_id="artist-1",
+            label="Artist",
+            metadata_json=json.dumps({"artist": "Artist"}),
+        )
+        album_candidate = _add_candidate(
+            session,
+            object_type="album",
+            object_id="album-1",
+            label="Artist - Album",
+            metadata_json=json.dumps({"artist": "Artist", "album": "Album"}),
+        )
+        track_candidate = _add_candidate(
+            session,
+            object_type="track",
+            object_id="track-1",
+            metadata_json=json.dumps(
+                {
+                    "artist": "Artist",
+                    "album": "Album",
+                    "title": "Title",
+                    "track_number": 1,
+                    "duration_ms": 300000,
+                }
+            ),
+        )
+
+        plan = _build_plan(session, config)
+
+    assert len(plan.blocked_quarantine_due) == 1
+    assert plan.blocked_quarantine_due[0].file_id == file_record.id
+    assert plan.blocked_quarantine_due[0].candidate_id == track_candidate.id
+    assert plan.blocked_quarantine_due[0].candidate_id != album_candidate.id
 
 
 def test_restore_handles_conflicts(tmp_path: Path) -> None:

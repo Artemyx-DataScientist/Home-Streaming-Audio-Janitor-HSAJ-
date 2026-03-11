@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from .models import Base, BlockCandidate, PlayHistory, RoonItemCache, RoonBlockRaw
+from .models import Base, BlockCandidate, PlayHistory, RoonBlockRaw, RoonItemCache
 
 MigrationCallable = Callable[[Connection], None]
 
@@ -93,6 +93,36 @@ def _migration_v5(conn: Connection) -> None:
     )
 
 
+def _migration_v6(conn: Connection) -> None:
+    raw_columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info(roon_blocks_raw)")).fetchall()
+    }
+    candidate_columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info(block_candidates)")).fetchall()
+    }
+
+    if "metadata_json" not in raw_columns:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE roon_blocks_raw
+                ADD COLUMN metadata_json TEXT NULL
+                """
+            )
+        )
+    if "metadata_json" not in candidate_columns:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE block_candidates
+                ADD COLUMN metadata_json TEXT NULL
+                """
+            )
+        )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -118,6 +148,11 @@ MIGRATIONS: list[Migration] = [
         version="0005_atmos_detected",
         description="Добавление устойчивого Atmos-флага для files",
         upgrade=_migration_v5,
+    ),
+    Migration(
+        version="0006_block_metadata",
+        description="Add metadata_json to roon_blocks_raw and block_candidates",
+        upgrade=_migration_v6,
     ),
 ]
 

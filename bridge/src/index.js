@@ -2,6 +2,7 @@
 import { createRequire } from "node:module";
 
 import { WebSocket, WebSocketServer } from "ws";
+import { createBlockedProvider } from "./blocked.js";
 
 const require = createRequire(import.meta.url);
 const RoonApi = require("node-roon-api");
@@ -267,7 +268,13 @@ const startApiServer = (port, host, healthProvider, trackProvider, blockedProvid
     }
 
     if (req.method === "GET" && url.pathname === "/blocked") {
-      const blocked = blockedProvider();
+      let blocked;
+      try {
+        blocked = blockedProvider();
+      } catch (error) {
+        sendJson(res, 500, { message: error.message });
+        return;
+      }
       if (blocked === null) {
         sendJson(res, 501, { message: "Blocked endpoint is not implemented" });
         return;
@@ -393,12 +400,13 @@ const startBridge = () => {
 
   const roonConnection = { status: /** @type {"connected" | "disconnected"} */ ("disconnected") };
   const observedState = createObservedState();
+  const blockedProvider = createBlockedProvider(process.env);
   const server = startApiServer(
     DEFAULT_PORT,
     DEFAULT_HOST,
     () => buildHealthResponse(roonConnection.status),
     observedState.getTrack,
-    () => null,
+    blockedProvider,
   );
   const channel = startWebSocketChannel(server, DEFAULT_WS_PATH, BRIDGE_SOURCE);
   observedState.setBroadcaster(channel.broadcastTransportEvent);

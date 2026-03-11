@@ -41,10 +41,11 @@ hsaj listen --config configs/hsaj.yaml
 The bridge exposes:
 - `GET /health`
 - `GET /track/{id}` for observed tracks
-- `GET /blocked`, which currently returns `501 Not Implemented` unless a real blocked-source is added
+- `GET /blocked`, backed by `BRIDGE_BLOCKED_FILE` or `BRIDGE_BLOCKED_JSON`
 - WebSocket `ws://127.0.0.1:8080/events` for `transport_event` payloads
 
 Observed transport events are sourced from Roon transport subscriptions. Demo tracks and demo blocks are no longer used.
+`/blocked` accepts `artist`, `album`, and `track` objects and preserves metadata like `artist`, `album`, `title`, `track_number`, and `duration_ms` for the core inheritance flow.
 
 ## Security defaults
 
@@ -56,6 +57,7 @@ Bridge defaults:
 Optional hardening:
 - set `BRIDGE_SHARED_SECRET` to require `X-HSAJ-Token` on HTTP and `?token=` or the same header on WebSocket
 - set `HSAJ_BRIDGE_TOKEN` in the core environment so HTTP and WS clients authenticate automatically
+- set `BRIDGE_BLOCKED_FILE=/path/to/blocked.json` or `BRIDGE_BLOCKED_JSON='[...]'` so `GET /blocked` returns a real blocked-object feed
 
 Do not expose the bridge publicly without a shared secret.
 
