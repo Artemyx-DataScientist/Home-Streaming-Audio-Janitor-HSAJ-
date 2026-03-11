@@ -1,10 +1,15 @@
-# Node
+﻿# Node
 node_modules
 bridge/node_modules
 
 # Python
 __pycache__
 *.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
 core/.venv
 core/.pytest_cache
 core/.ruff_cache

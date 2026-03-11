@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -13,6 +13,7 @@ from .atmos import AtmosMovePlan, is_atmos, plan_atmos_moves
 from .config import HsajConfig
 from .db.models import BlockCandidate, File, RoonItemCache
 from .roon import RoonTrack, match_track_by_metadata
+from .timeutils import ensure_utc, utc_isoformat, utc_now
 
 
 @dataclass(slots=True)
@@ -49,9 +50,7 @@ class Plan:
             return str(value)
 
         def _serialize_datetime(value: datetime | None) -> str | None:
-            if value is None:
-                return None
-            return value.astimezone(timezone.utc).isoformat()
+            return utc_isoformat(value)
 
         def _serialize_move(move: AtmosMovePlan) -> dict[str, object]:
             payload = asdict(move)
@@ -124,11 +123,7 @@ def _build_quarantine_destination(
 
 
 def _safe_datetime(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return ensure_utc(value)
 
 
 def _plan_for_candidate(
@@ -225,9 +220,9 @@ def build_plan(
     now: datetime | None = None,
     atmos_detection_fn: Callable[[Path], bool] | None = None,
 ) -> Plan:
-    current_time = now or datetime.now(timezone.utc)
+    current_time = ensure_utc(now) or utc_now()
     if config.paths.quarantine_dir is None:
-        raise ValueError("В конфиге не задан paths.quarantine_dir")
+        raise ValueError("paths.quarantine_dir must be configured")
 
     date_folder = current_time.date().isoformat()
     atmos_moves: list[AtmosMovePlan] = []

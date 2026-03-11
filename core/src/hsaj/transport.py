@@ -1,17 +1,19 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Callable, Mapping
 
 import websockets
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .bridge_auth import append_bridge_token
 from .db.models import PlayHistory
+from .timeutils import ensure_utc, utc_now
 
 logger = logging.getLogger(__name__)
 DEFAULT_BRIDGE_WS_URL = "ws://localhost:8080/events"
@@ -19,21 +21,15 @@ DEFAULT_BRIDGE_WS_URL = "ws://localhost:8080/events"
 
 def _parse_timestamp(value: str | None) -> datetime:
     if value is None:
-        return datetime.now(tz=timezone.utc)
+        return utc_now()
 
     parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _normalize_to_utc_naive(value: datetime) -> datetime:
-    if value.tzinfo:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    return ensure_utc(parsed) or utc_now()
 
 
 @dataclass(frozen=True)
 class TransportEvent:
-    """Нормализованное событие транспортного уровня из bridge."""
+    """Normalized transport event received from the bridge."""
 
     event: str
     track_id: str
@@ -48,7 +44,7 @@ class TransportEvent:
     raw_payload: Mapping[str, Any] | None = None
 
     def describe(self) -> str:
-        """Строковое описание события для логов."""
+        """Return a concise string for logs."""
 
         quality = self.quality or "unknown"
         return (
@@ -58,22 +54,22 @@ class TransportEvent:
 
     @classmethod
     def from_ws_message(cls, message: str | Mapping[str, Any]) -> "TransportEvent":
-        """Парсит сообщение WebSocket в TransportEvent."""
+        """Parse a WebSocket payload into TransportEvent."""
 
         payload: Mapping[str, Any] = (
             json.loads(message) if isinstance(message, str) else message
         )
         if payload.get("type") != "transport_event":
-            raise ValueError("Поддерживаются только сообщения type=transport_event")
+            raise ValueError("Only type=transport_event messages are supported")
 
         event_payload = payload.get("event")
         if not isinstance(event_payload, Mapping):
-            raise ValueError("Поле event отсутствует или имеет неверный формат")
+            raise ValueError("event field is missing or has an invalid format")
 
         event = str(event_payload.get("event", "")).strip()
         track_id = str(event_payload.get("track_id", "")).strip()
         if not event or not track_id:
-            raise ValueError("transport_event требует поля event и track_id")
+            raise ValueError("transport_event requires both event and track_id")
 
         duration_raw = event_payload.get("duration_ms")
         duration_ms = int(duration_raw) if duration_raw is not None else None
@@ -110,7 +106,7 @@ class TransportEvent:
 
 
 class TransportEventProcessor:
-    """Обработчик транспортных событий (лог + запись в play_history)."""
+    """Process transport events and write play history."""
 
     def __init__(
         self,
@@ -125,9 +121,9 @@ class TransportEventProcessor:
         return self._logger
 
     def handle_event(self, event: TransportEvent) -> None:
-        """Логирует событие и применяет его к истории воспроизведений."""
+        """Log an event and apply it to play_history."""
 
-        self._logger.info("Получено событие: %s", event.describe())
+        self._logger.info("Received event: %s", event.describe())
 
         with self._session_factory() as session:
             self._close_previous_entry(session=session, ended_at=event.timestamp)
@@ -144,8 +140,8 @@ class TransportEventProcessor:
         if open_entry is None:
             return
 
-        normalized_start = _normalize_to_utc_naive(open_entry.started_at)
-        normalized_end = _normalize_to_utc_naive(ended_at)
+        normalized_start = ensure_utc(open_entry.started_at) or utc_now()
+        normalized_end = ensure_utc(ended_at) or utc_now()
 
         open_entry.ended_at = normalized_end
         delta = normalized_end - normalized_start
@@ -166,7 +162,7 @@ class TransportEventProcessor:
                 source=event.source,
                 user_id=event.user_id,
                 quality=event.quality,
-                started_at=_normalize_to_utc_naive(event.timestamp),
+                started_at=ensure_utc(event.timestamp) or utc_now(),
                 title=event.title,
                 artist=event.artist,
                 album=event.album,
@@ -181,24 +177,25 @@ async def listen_to_bridge(
     stop_event: asyncio.Event | None = None,
     reconnect_delay: float = 2.0,
 ) -> None:
-    """Подключается к WebSocket bridge и непрерывно обрабатывает события."""
+    """Connect to the bridge WebSocket and process events forever."""
 
+    connect_url = append_bridge_token(ws_url)
     while stop_event is None or not stop_event.is_set():
         try:
-            async with websockets.connect(ws_url) as websocket:
-                processor.logger.info("Подключение к bridge установлено: %s", ws_url)
+            async with websockets.connect(connect_url) as websocket:
+                processor.logger.info("Connected to bridge: %s", connect_url)
                 async for message in websocket:
                     try:
                         event = TransportEvent.from_ws_message(message)
                     except ValueError as exc:
-                        processor.logger.warning("Пропуск сообщения: %s", exc)
+                        processor.logger.warning("Skipping message: %s", exc)
                         continue
                     processor.handle_event(event)
                     if stop_event is not None and stop_event.is_set():
                         break
-        except Exception as exc:  # pragma: no cover - сетевые ошибки в проде
+        except Exception as exc:  # pragma: no cover - network errors in production
             processor.logger.warning(
-                "WS соединение разорвано (%s), переподключение...", exc
+                "WebSocket connection dropped (%s), reconnecting...", exc
             )
             if stop_event is not None and stop_event.is_set():
                 break

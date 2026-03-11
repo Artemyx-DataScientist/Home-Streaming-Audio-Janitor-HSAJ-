@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -41,7 +41,9 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
     _create_id3_file(file_path)
 
     summary_first = scan_library(
-        engine=engine, library_roots=[library_root], dry_run=False
+        engine=engine,
+        library_roots=[library_root],
+        dry_run=False,
     )
 
     assert summary_first.found_files == 1
@@ -62,7 +64,9 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
     os.utime(file_path, (new_epoch, new_epoch))
 
     summary_second = scan_library(
-        engine=engine, library_roots=[library_root], dry_run=False
+        engine=engine,
+        library_roots=[library_root],
+        dry_run=False,
     )
 
     assert summary_second.found_files == 1
@@ -72,14 +76,19 @@ def test_scan_creates_and_updates_file(tmp_path: Path) -> None:
         assert updated.mtime > first_mtime
 
 
-def test_scan_handles_file_without_tags(tmp_path: Path) -> None:
+def test_scan_handles_file_without_tags_when_extension_is_allowed(tmp_path: Path) -> None:
     engine = _prepare_db(tmp_path)
     library_root = tmp_path / "library"
     library_root.mkdir()
     file_path = library_root / "no_tags.bin"
     file_path.write_text("content")
 
-    summary = scan_library(engine=engine, library_roots=[library_root], dry_run=False)
+    summary = scan_library(
+        engine=engine,
+        library_roots=[library_root],
+        allowed_extensions=["bin"],
+        dry_run=False,
+    )
 
     assert summary.found_files == 1
     assert summary.created == 1
@@ -87,3 +96,29 @@ def test_scan_handles_file_without_tags(tmp_path: Path) -> None:
         stored = session.execute(select(File)).scalar_one()
         assert stored.artist is None
         assert stored.title is None
+
+
+def test_scan_skips_excluded_directories(tmp_path: Path) -> None:
+    engine = _prepare_db(tmp_path)
+    library_root = tmp_path / "library"
+    included = library_root / "included"
+    excluded = library_root / "excluded"
+    included.mkdir(parents=True)
+    excluded.mkdir(parents=True)
+
+    _create_id3_file(included / "track.mp3")
+    _create_id3_file(excluded / "skip.mp3")
+
+    summary = scan_library(
+        engine=engine,
+        library_roots=[library_root],
+        excluded_dirs=[excluded],
+        batch_size=1,
+        dry_run=False,
+    )
+
+    assert summary.found_files == 1
+    with Session(engine) as session:
+        stored = session.scalars(select(File)).all()
+        assert len(stored) == 1
+        assert stored[0].path.endswith("included\\track.mp3")

@@ -1,4 +1,4 @@
-import http from "node:http";
+﻿import http from "node:http";
 import { createRequire } from "node:module";
 
 import { WebSocket, WebSocketServer } from "ws";
@@ -6,47 +6,84 @@ import { WebSocket, WebSocketServer } from "ws";
 const require = createRequire(import.meta.url);
 const RoonApi = require("node-roon-api");
 const RoonApiStatus = require("node-roon-api-status");
+const RoonApiTransport = require("node-roon-api-transport");
 
 const DEFAULT_WS_PATH = process.env.BRIDGE_WS_PATH ?? "/events";
-const DEFAULT_WS_INTERVAL_MS = Number.parseInt(process.env.BRIDGE_DEMO_INTERVAL ?? "15000", 10);
+const DEFAULT_HOST = process.env.BRIDGE_HOST ?? "127.0.0.1";
+const DEFAULT_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? process.env.PORT ?? "8080", 10);
 const BRIDGE_SOURCE = process.env.BRIDGE_SOURCE ?? "bridge";
-const BLOCKED_ENDPOINT_ENABLED = process.env.BRIDGE_BLOCKED_NOT_IMPLEMENTED !== "1";
+const SHARED_SECRET = (process.env.BRIDGE_SHARED_SECRET ?? "").trim();
 
-/**
- * @typedef {"connected" | "disconnected"} RoonConnectionState
- */
+const isLoopbackHost = (host) =>
+  host === "127.0.0.1" || host === "localhost" || host === "::1";
 
-/**
- * @typedef {Object} HealthResponse
- * @property {"ok"} status
- * @property {RoonConnectionState} roon
- */
+const ensureSecurityConfiguration = (host, sharedSecret) => {
+  if (!isLoopbackHost(host) && !sharedSecret) {
+    throw new Error("BRIDGE_SHARED_SECRET is required when BRIDGE_HOST is not loopback");
+  }
+};
 
-/**
- * @param {RoonConnectionState} roonStatus
- * @returns {HealthResponse}
- */
+const getRequestUrl = (req) => new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+const extractToken = (req) => {
+  const header = req.headers["x-hsaj-token"];
+  if (typeof header === "string" && header.trim()) {
+    return header.trim();
+  }
+  const queryToken = getRequestUrl(req).searchParams.get("token");
+  return queryToken?.trim() || null;
+};
+
+const isAuthorized = (req) => {
+  if (!SHARED_SECRET) {
+    return true;
+  }
+  return extractToken(req) === SHARED_SECRET;
+};
+
+const sendJson = (res, statusCode, payload) => {
+  res.writeHead(statusCode, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(payload));
+};
+
+const normalizeString = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = String(value).trim();
+  return text || null;
+};
+
+const parseOptionalInt = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toDurationMs = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const numeric = Number.parseFloat(String(value));
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  if (numeric > 100000) {
+    return Math.round(numeric);
+  }
+  return Math.round(numeric * 1000);
+};
+
+const buildObservedTrackId = ({ zoneId, title, artist, album, durationMs, trackno }) => {
+  const identity = [zoneId, title ?? "", artist ?? "", album ?? "", trackno ?? "", durationMs ?? ""]
+    .join("|");
+  return `observed:${Buffer.from(identity).toString("base64url")}`;
+};
+
 const buildHealthResponse = (roonStatus) => ({ status: "ok", roon: roonStatus });
 
-/**
- * @typedef {Object} TransportEventPayload
- * @property {"track_start" | "track_stop"} event
- * @property {string} track_id
- * @property {string} [title]
- * @property {string} [album]
- * @property {string} [artist]
- * @property {string} [quality]
- * @property {number} [duration_ms]
- * @property {number} [trackno]
- * @property {string} [timestamp]
- * @property {string} [source]
- */
-
-/**
- * @param {TransportEventPayload} payload
- * @param {string} source
- * @returns {string}
- */
 const buildTransportMessage = (payload, source) =>
   JSON.stringify({
     type: "transport_event",
@@ -57,13 +94,222 @@ const buildTransportMessage = (payload, source) =>
     },
   });
 
-/**
- * @param {http.Server} server
- * @param {string} path
- * @param {string} source
- */
+const buildTrackDetailsFromZone = (zone) => {
+  if (!zone?.zone_id) {
+    return null;
+  }
+
+  const state = normalizeString(zone.state)?.toLowerCase();
+  if (state && state !== "playing") {
+    return null;
+  }
+
+  const nowPlaying = zone.now_playing;
+  if (!nowPlaying) {
+    return null;
+  }
+
+  const title = normalizeString(nowPlaying.title ?? nowPlaying.three_line?.line1);
+  const artist = normalizeString(nowPlaying.artist ?? nowPlaying.three_line?.line2);
+  const album = normalizeString(nowPlaying.album ?? nowPlaying.three_line?.line3);
+  const durationMs = toDurationMs(nowPlaying.length ?? nowPlaying.duration ?? nowPlaying.seek_position);
+  const trackno = parseOptionalInt(nowPlaying.track_number ?? nowPlaying.trackno);
+  const quality = normalizeString(nowPlaying.format);
+
+  if (!title && !artist && !album) {
+    return null;
+  }
+
+  const roon_track_id = buildObservedTrackId({
+    zoneId: zone.zone_id,
+    title,
+    artist,
+    album,
+    durationMs,
+    trackno,
+  });
+
+  return {
+    roon_track_id,
+    artist,
+    album,
+    title,
+    duration_ms: durationMs,
+    trackno,
+    quality,
+  };
+};
+
+const buildZoneSource = (zoneId, zoneName) => `${BRIDGE_SOURCE}:${zoneName ?? zoneId}`;
+
+const createObservedState = () => {
+  /** @type {Map<string, { roon_track_id: string, artist: string | null, album: string | null, title: string | null, duration_ms: number | null, trackno: number | null }>} */
+  const tracksById = new Map();
+  /** @type {Map<string, string>} */
+  const currentTrackByZone = new Map();
+  /** @type {Map<string, string>} */
+  const zoneNames = new Map();
+  /** @type {(payload: object) => void} */
+  let broadcast = () => {};
+
+  const rememberTrack = (track) => {
+    tracksById.set(track.roon_track_id, {
+      roon_track_id: track.roon_track_id,
+      artist: track.artist,
+      album: track.album,
+      title: track.title,
+      duration_ms: track.duration_ms,
+      trackno: track.trackno,
+    });
+  };
+
+  const stopZone = (zoneId) => {
+    const currentTrackId = currentTrackByZone.get(zoneId);
+    if (!currentTrackId) {
+      return;
+    }
+    broadcast({
+      event: "track_stop",
+      track_id: currentTrackId,
+      source: buildZoneSource(zoneId, zoneNames.get(zoneId)),
+    });
+    currentTrackByZone.delete(zoneId);
+  };
+
+  const updateZone = (zone) => {
+    const zoneId = normalizeString(zone?.zone_id);
+    if (!zoneId) {
+      return;
+    }
+
+    zoneNames.set(zoneId, normalizeString(zone.display_name) ?? zoneId);
+    const track = buildTrackDetailsFromZone(zone);
+    if (!track) {
+      stopZone(zoneId);
+      return;
+    }
+
+    rememberTrack(track);
+    if (currentTrackByZone.get(zoneId) === track.roon_track_id) {
+      return;
+    }
+
+    stopZone(zoneId);
+    currentTrackByZone.set(zoneId, track.roon_track_id);
+    broadcast({
+      event: "track_start",
+      track_id: track.roon_track_id,
+      title: track.title ?? undefined,
+      album: track.album ?? undefined,
+      artist: track.artist ?? undefined,
+      quality: track.quality ?? undefined,
+      duration_ms: track.duration_ms ?? undefined,
+      trackno: track.trackno ?? undefined,
+      source: buildZoneSource(zoneId, zoneNames.get(zoneId)),
+    });
+  };
+
+  const removeZone = (zone) => {
+    const zoneId = normalizeString(zone?.zone_id);
+    if (!zoneId) {
+      return;
+    }
+    stopZone(zoneId);
+    zoneNames.delete(zoneId);
+  };
+
+  const replaceZones = (zones) => {
+    const seenZoneIds = new Set();
+    zones.forEach((zone) => {
+      const zoneId = normalizeString(zone?.zone_id);
+      if (!zoneId) {
+        return;
+      }
+      seenZoneIds.add(zoneId);
+      updateZone(zone);
+    });
+
+    Array.from(currentTrackByZone.keys())
+      .filter((zoneId) => !seenZoneIds.has(zoneId))
+      .forEach((zoneId) => removeZone({ zone_id: zoneId }));
+  };
+
+  const reset = () => {
+    Array.from(currentTrackByZone.keys()).forEach((zoneId) => stopZone(zoneId));
+    currentTrackByZone.clear();
+    zoneNames.clear();
+  };
+
+  return {
+    getTrack: (roonTrackId) => tracksById.get(roonTrackId) ?? null,
+    removeZone,
+    replaceZones,
+    reset,
+    setBroadcaster: (fn) => {
+      broadcast = fn;
+    },
+    updateZone,
+  };
+};
+
+const startApiServer = (port, host, healthProvider, trackProvider, blockedProvider) => {
+  const server = http.createServer((req, res) => {
+    const url = getRequestUrl(req);
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      sendJson(res, 200, healthProvider());
+      return;
+    }
+
+    if (!isAuthorized(req)) {
+      sendJson(res, 401, { message: "Unauthorized" });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/blocked") {
+      const blocked = blockedProvider();
+      if (blocked === null) {
+        sendJson(res, 501, { message: "Blocked endpoint is not implemented" });
+        return;
+      }
+      sendJson(res, 200, blocked);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/track/")) {
+      const roonTrackId = decodeURIComponent(url.pathname.replace("/track/", ""));
+      const track = trackProvider(roonTrackId);
+
+      if (track) {
+        sendJson(res, 200, track);
+        return;
+      }
+
+      sendJson(res, 404, { message: "Track not found", roon_track_id: roonTrackId });
+      return;
+    }
+
+    sendJson(res, 404, { message: "Not Found" });
+  });
+
+  server.listen(port, host, () => {
+    console.log(`Bridge HTTP endpoint listening on http://${host}:${port}`);
+  });
+  return server;
+};
+
 const startWebSocketChannel = (server, path, source) => {
-  const wss = new WebSocketServer({ server, path });
+  const wss = new WebSocketServer({
+    server,
+    path,
+    verifyClient: (info, done) => {
+      if (isAuthorized(info.req)) {
+        done(true);
+        return;
+      }
+      done(false, 401, "Unauthorized");
+    },
+  });
 
   const broadcastTransportEvent = (payload) => {
     const message = buildTransportMessage(payload, source);
@@ -82,75 +328,28 @@ const startWebSocketChannel = (server, path, source) => {
   return { broadcastTransportEvent };
 };
 
-/**
- * @param {TransportEventPayload} track
- * @returns {TransportEventPayload}
- */
-const normalizeTrackPayload = (track) => ({
-  ...track,
-  event: "track_start",
-});
+const handleZoneSubscription = (data, observedState) => {
+  if (!data || typeof data !== "object") {
+    return;
+  }
 
-/**
- * @param {(payload: TransportEventPayload) => void} broadcaster
- */
-const createTransportEmitter = (broadcaster) => {
-  /** @type {string | null} */
-  let currentTrackId = null;
+  if (Array.isArray(data.zones)) {
+    observedState.replaceZones(data.zones);
+    return;
+  }
 
-  /**
-   * @param {TransportEventPayload} track
-   * @returns {void}
-   */
-  const trackStart = (track) => {
-    if (!track.track_id) {
-      return;
-    }
-    if (currentTrackId === track.track_id) {
-      return;
-    }
-    currentTrackId = track.track_id;
-    broadcaster(normalizeTrackPayload(track));
-  };
-
-  /**
-   * @param {"track_stop" | "track_start"} reason
-   * @returns {void}
-   */
-  const stopCurrentTrack = (reason = "track_stop") => {
-    if (!currentTrackId) {
-      return;
-    }
-    broadcaster({
-      event: reason,
-      track_id: currentTrackId,
-    });
-    currentTrackId = null;
-  };
-
-  return { trackStart, stopCurrentTrack };
+  if (Array.isArray(data.zones_removed)) {
+    data.zones_removed.forEach((zone) => observedState.removeZone(zone));
+  }
+  if (Array.isArray(data.zones_added)) {
+    data.zones_added.forEach((zone) => observedState.updateZone(zone));
+  }
+  if (Array.isArray(data.zones_changed)) {
+    data.zones_changed.forEach((zone) => observedState.updateZone(zone));
+  }
 };
 
-/**
- * @param {(track: TransportEventPayload) => void} trackStart
- * @returns {NodeJS.Timeout}
- */
-const startDemoTransportFeed = (trackStart) => {
-  const demoTracks = DEMO_TRACKS;
-
-  let currentIndex = 0;
-  trackStart(demoTracks[currentIndex]);
-  return setInterval(() => {
-    currentIndex = (currentIndex + 1) % demoTracks.length;
-    trackStart(demoTracks[currentIndex]);
-  }, DEFAULT_WS_INTERVAL_MS);
-};
-
-/**
- * @param {{ status: RoonConnectionState }} roonConnection
- * @returns {{ roon: unknown, statusService: unknown }}
- */
-const createRoonClient = (roonConnection) => {
+const createRoonClient = (roonConnection, observedState) => {
   /** @type {ReturnType<typeof RoonApiStatus>} */
   let statusService;
 
@@ -165,161 +364,48 @@ const createRoonClient = (roonConnection) => {
       roonConnection.status = "connected";
       statusService.set_status("OK", `Connected to ${core.display_name}`);
       console.log(`Connected to Roon Core: ${core.display_name} (${core.core_id})`);
+      core.services.RoonApiTransport.subscribe_zones((cmd, data) => {
+        console.log(`[transport] ${cmd}`);
+        handleZoneSubscription(data, observedState);
+      });
     },
-    core_unpaired: () => {
+    core_unpaired: (core) => {
       roonConnection.status = "disconnected";
       statusService.set_status("Disconnected", "Waiting for Roon Core");
-      console.warn("Lost connection to Roon Core. Waiting for re-connection...");
+      observedState.reset();
+      console.warn(`Lost connection to Roon Core: ${core?.display_name ?? "unknown core"}`);
     },
   });
 
   statusService = new RoonApiStatus(roon);
-  roon.init_services({ provided_services: [statusService] });
+  roon.init_services({
+    required_services: [RoonApiTransport],
+    provided_services: [statusService],
+  });
   statusService.set_status("Initializing", "Searching for Roon Core");
   roon.start_discovery();
 
   return { roon, statusService };
 };
 
-/**
- * @typedef {Object} TrackDetails
- * @property {string} roon_track_id
- * @property {string} artist
- * @property {string} album
- * @property {string} title
- * @property {number} duration_ms
- * @property {number} trackno
- */
-
-/**
- * @param {number} port
- * @param {() => HealthResponse} healthProvider
- * @param {(roonTrackId: string) => TrackDetails | null} trackProvider
- * @param {() => Array<{ type: string, id: string, label?: string }>} blockedProvider
- * @returns {http.Server}
- */
-const startApiServer = (port, healthProvider, trackProvider, blockedProvider) => {
-  const server = http.createServer((req, res) => {
-    const url = req.url ? new URL(req.url, `http://${req.headers.host}`) : null;
-
-    if (req.method === "GET" && url?.pathname === "/health") {
-      const response = healthProvider();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(response));
-      return;
-    }
-
-    if (req.method === "GET" && url?.pathname === "/blocked") {
-      if (!BLOCKED_ENDPOINT_ENABLED) {
-        res.writeHead(501, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: "Blocked endpoint is not implemented in this build" }));
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(blockedProvider()));
-      return;
-    }
-
-    if (req.method === "GET" && url?.pathname?.startsWith("/track/")) {
-      const roonTrackId = decodeURIComponent(url.pathname.replace("/track/", ""));
-      const track = trackProvider(roonTrackId);
-
-      if (track) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(track));
-        return;
-      }
-
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ message: "Track not found", roon_track_id: roonTrackId }));
-      return;
-    }
-
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ message: "Not Found" }));
-  });
-
-  server.listen(port, () => {
-    console.log(`Health endpoint listening on :${port}/health`);
-  });
-  return server;
-};
-
-/** @type {Array<TransportEventPayload & TrackDetails>} */
-const DEMO_TRACKS = [
-  {
-    roon_track_id: "demo-track-1",
-    track_id: "demo-track-1",
-    title: "Demo Track 1",
-    artist: "HSAJ Dev",
-    album: "Bridge Demo",
-    quality: "lossless",
-    duration_ms: 180_000,
-    trackno: 1,
-  },
-  {
-    roon_track_id: "demo-track-2",
-    track_id: "demo-track-2",
-    title: "Demo Track 2",
-    artist: "HSAJ Dev",
-    album: "Bridge Demo",
-    quality: "atmos",
-    duration_ms: 200_000,
-    trackno: 2,
-  },
-];
-
-/** @type {Array<{ type: string, id: string, label?: string }>} */
-const DEMO_BLOCKS = [
-  { type: "track", id: "demo-track-2", label: "Demo Track 2 (blocked)" },
-  { type: "artist", id: "demo-artist-1", label: "HSAJ Dev" },
-];
-
-/**
- * @param {string} roonTrackId
- * @returns {TrackDetails | null}
- */
-const getTrackDetails = (roonTrackId) => {
-  const track = DEMO_TRACKS.find(
-    (item) => item.roon_track_id === roonTrackId || item.track_id === roonTrackId,
-  );
-  if (!track) {
-    return null;
-  }
-  return {
-    roon_track_id: track.roon_track_id,
-    artist: track.artist,
-    album: track.album,
-    title: track.title,
-    duration_ms: track.duration_ms,
-    trackno: track.trackno,
-  };
-};
-
-/**
- * Стартует dev-экземпляр bridge и подключает Roon.
- * @returns {void}
- */
 const startBridge = () => {
-  const port = Number.parseInt(process.env.BRIDGE_PORT ?? process.env.PORT ?? "8080", 10);
-  const wsPath = process.env.BRIDGE_WS_PATH ?? DEFAULT_WS_PATH;
-  const roonConnection = { status: /** @type {RoonConnectionState} */ ("disconnected") };
+  ensureSecurityConfiguration(DEFAULT_HOST, SHARED_SECRET);
 
-  createRoonClient(roonConnection);
+  const roonConnection = { status: /** @type {"connected" | "disconnected"} */ ("disconnected") };
+  const observedState = createObservedState();
   const server = startApiServer(
-    port,
+    DEFAULT_PORT,
+    DEFAULT_HOST,
     () => buildHealthResponse(roonConnection.status),
-    getTrackDetails,
-    () => DEMO_BLOCKS,
+    observedState.getTrack,
+    () => null,
   );
-  const channel = startWebSocketChannel(server, wsPath, BRIDGE_SOURCE);
-  const emitter = createTransportEmitter(channel.broadcastTransportEvent);
+  const channel = startWebSocketChannel(server, DEFAULT_WS_PATH, BRIDGE_SOURCE);
+  observedState.setBroadcaster(channel.broadcastTransportEvent);
+  createRoonClient(roonConnection, observedState);
 
-  if (process.env.BRIDGE_DISABLE_DEMO !== "1") {
-    startDemoTransportFeed(emitter.trackStart);
-  }
-
-  console.log(`HSAJ bridge dev server started. WS endpoint ws://localhost:${port}${wsPath}`);
+  console.log(`HSAJ bridge started. WS endpoint ws://${DEFAULT_HOST}:${DEFAULT_PORT}${DEFAULT_WS_PATH}`);
 };
 
 startBridge();
+

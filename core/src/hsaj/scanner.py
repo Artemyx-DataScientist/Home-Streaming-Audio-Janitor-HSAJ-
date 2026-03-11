@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,17 +59,16 @@ def _extract_tags(path: Path) -> dict[str, str | list[str] | None]:
     try:
         audio = File(path, easy=True)
     except HeaderNotFoundError:
-        # Файл с ID3 без аудиофреймов
         try:
             tags = EasyID3(path)
             return dict(tags)
         except ID3NoHeaderError:
             return {}
-        except Exception as exc:  # pragma: no cover - защитный блок
-            logger.warning("Не удалось прочитать теги ID3 у %s: %s", path, exc)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Could not read ID3 tags for %s: %s", path, exc)
             return {}
     except Exception as exc:
-        logger.warning("Ошибка чтения тегов %s: %s", path, exc)
+        logger.warning("Tag read error for %s: %s", path, exc)
         return {}
 
     if audio is None or not audio.tags:
@@ -93,8 +93,8 @@ def _extract_metadata(path: Path) -> FileMetadata:
             and getattr(audio.info, "length", None)
         ):
             duration_seconds = int(audio.info.length)
-    except Exception as exc:  # pragma: no cover - защитный блок
-        logger.warning("Не удалось получить длительность %s: %s", path, exc)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Could not read duration for %s: %s", path, exc)
 
     return FileMetadata(
         path=path.resolve(),
@@ -119,38 +119,98 @@ def _first_tag(tags: dict[str, str | list[str] | None], key: str) -> str | None:
     return str(value)
 
 
+def _normalize_extensions(extensions: Sequence[str] | None) -> set[str] | None:
+    if extensions is None:
+        return None
+    normalized = {
+        f".{item.strip().lstrip('.').lower()}"
+        for item in extensions
+        if str(item).strip()
+    }
+    return normalized or None
+
+
+def _should_skip_dir(path: Path, excluded_dirs: Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for excluded in excluded_dirs:
+        try:
+            if resolved.is_relative_to(excluded.resolve()):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _iter_files(roots: Sequence[Path]) -> Iterable[Path]:
+    yield from _iter_files_filtered(
+        roots=roots,
+        allowed_extensions=None,
+        excluded_dirs=(),
+    )
+
+
+def _iter_files_filtered(
+    roots: Sequence[Path],
+    allowed_extensions: Sequence[str] | None,
+    excluded_dirs: Sequence[Path],
+) -> Iterable[Path]:
+    normalized_extensions = _normalize_extensions(allowed_extensions)
     seen: set[Path] = set()
     for root in roots:
         if not root.exists():
-            logger.warning("Директория %s не существует, пропускаем", root)
+            logger.warning("Directory %s does not exist, skipping", root)
             continue
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            yield resolved
+        for dirpath, dirnames, filenames in os.walk(root):
+            current_dir = Path(dirpath)
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not _should_skip_dir(current_dir / name, excluded_dirs)
+            ]
+            for filename in filenames:
+                path = current_dir / filename
+                if (
+                    normalized_extensions is not None
+                    and path.suffix.lower() not in normalized_extensions
+                ):
+                    continue
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                yield resolved
 
 
 def scan_library(
     engine: Engine,
     library_roots: Sequence[Path],
+    allowed_extensions: Sequence[str] | None = None,
+    excluded_dirs: Sequence[Path] = (),
+    batch_size: int = 200,
     dry_run: bool = False,
 ) -> ScanSummary:
     summary = ScanSummary()
 
-    files_iter = list(_iter_files(library_roots))
-    summary.found_files = len(files_iter)
+    file_iter = _iter_files_filtered(
+        roots=library_roots,
+        allowed_extensions=allowed_extensions,
+        excluded_dirs=excluded_dirs,
+    )
     if dry_run:
+        for _ in file_iter:
+            summary.found_files += 1
         return summary
 
+    pending = 0
     with Session(engine) as session:
-        for file_path in files_iter:
+        for file_path in file_iter:
+            summary.found_files += 1
             metadata = _extract_metadata(file_path)
             summary = _upsert_file(session=session, metadata=metadata, summary=summary)
+            pending += 1
+            if pending >= batch_size:
+                session.commit()
+                pending = 0
         session.commit()
 
     return summary

@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "hsaj-bridge",
   "version": "0.1.0",
   "private": true,
@@ -14,6 +14,7 @@
   "dependencies": {
     "node-roon-api": "github:RoonLabs/node-roon-api",
     "node-roon-api-status": "github:RoonLabs/node-roon-api-status",
+    "node-roon-api-transport": "github:RoonLabs/node-roon-api-transport#c6c229c",
     "ws": "^8.18.0"
   }
 }

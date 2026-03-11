@@ -1,10 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +14,7 @@ from .atmos import AtmosMovePlan
 from .config import HsajConfig
 from .db.models import ActionLog, BlockCandidate, File
 from .planner import Plan, QuarantineMovePlan
+from .timeutils import utc_isoformat, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,29 @@ def _log_action(
     )
 
 
+def _log_plan(session: Session, plan: Plan, *, dry_run: bool) -> None:
+    payload = plan.to_dict()
+    payload.update(
+        {
+            "command": "apply",
+            "dry_run": dry_run,
+            "generated_at": utc_isoformat(utc_now()),
+            "counts": {
+                "atmos_moves": len(plan.atmos_moves),
+                "blocked_quarantine_due": len(plan.blocked_quarantine_due),
+                "blocked_quarantine_future": len(plan.blocked_quarantine_future),
+                "low_confidence": len(plan.low_confidence),
+            },
+        }
+    )
+    _log_action(
+        session=session,
+        action="plan",
+        target_path=Path("."),
+        details=payload,
+    )
+
+
 def _already_quarantined(candidate: BlockCandidate) -> bool:
     return candidate.status == "quarantined"
 
@@ -60,7 +83,7 @@ def _apply_atmos_moves(
             continue
         if not move.source.exists():
             logger.warning(
-                "Источник отсутствует, пропускаем перемещение Atmos: %s", move.source
+                "Source is missing, skipping Atmos move: %s", move.source
             )
             continue
 
@@ -97,7 +120,7 @@ def _apply_quarantine_moves(
             continue
         if not move.source.exists():
             logger.warning(
-                "Источник отсутствует, пропускаем перенос в карантин: %s", move.source
+                "Source is missing, skipping quarantine move: %s", move.source
             )
             continue
 
@@ -132,6 +155,8 @@ def apply_plan(
     *,
     dry_run: bool = False,
 ) -> ApplyResult:
+    _log_plan(session=session, plan=plan, dry_run=dry_run)
+
     if dry_run:
         _log_action(
             session=session,
@@ -143,7 +168,7 @@ def apply_plan(
         return ApplyResult(applied_atmos=[], quarantined=[], skipped=[], dry_run=True)
 
     if config.paths.quarantine_dir is None:
-        raise ValueError("В конфиге не задан paths.quarantine_dir")
+        raise ValueError("paths.quarantine_dir must be configured")
 
     config.paths.quarantine_dir.mkdir(parents=True, exist_ok=True)
 
@@ -253,7 +278,7 @@ def restore_from_quarantine(session: Session, target: Path | int) -> RestoreResu
         candidate = session.get(BlockCandidate, int(candidate_id))
         if candidate is not None:
             candidate.status = "restored"
-            candidate.restored_at = datetime.now(timezone.utc)
+            candidate.restored_at = utc_now()
 
     _log_action(
         session=session,

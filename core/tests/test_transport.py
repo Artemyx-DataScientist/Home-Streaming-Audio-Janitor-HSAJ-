@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -77,7 +77,7 @@ def test_two_track_changes_close_previous_entry() -> None:
         ).all()
 
         assert len(history) == 2
-        assert history[0].ended_at == second_started.replace(tzinfo=None)
+        assert history[0].ended_at == second_started
         assert history[0].played_ms == 42_000
         assert history[1].ended_at is None
 
@@ -111,5 +111,5 @@ def test_track_stop_closes_open_entry() -> None:
         history = session.scalars(select(PlayHistory)).all()
 
         assert len(history) == 1
-        assert history[0].ended_at == stopped_at.replace(tzinfo=None)
+        assert history[0].ended_at == stopped_at
         assert history[0].played_ms == 10_000

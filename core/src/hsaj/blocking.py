@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Literal, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -10,8 +10,10 @@ from urllib.request import Request, urlopen
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .bridge_auth import build_bridge_headers
 from .db.models import BlockCandidate, RoonBlockRaw
 from .roon import BridgeClientError, DEFAULT_BRIDGE_HTTP_URL
+from .timeutils import ensure_utc, utc_now
 
 CandidateStatus = Literal["planned", "restored"]
 BLOCK_GRACE_DAYS_DEFAULT = 30
@@ -19,7 +21,7 @@ BLOCK_GRACE_DAYS_DEFAULT = 30
 
 @dataclass(frozen=True)
 class BlockedObject:
-    """Минимальное представление заблокированного объекта из Roon."""
+    """Minimal blocked object returned by the bridge."""
 
     object_type: str
     object_id: str
@@ -27,13 +29,12 @@ class BlockedObject:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "BlockedObject":
-        """Создаёт объект из произвольного словаря."""
+        """Create a blocked object from bridge JSON payload."""
 
         object_type_raw = str(payload.get("type", "")).strip()
         object_id_raw = str(payload.get("id", "")).strip()
         if not object_type_raw or not object_id_raw:
-            msg = "Ответ bridge должен содержать поля type и id"
-            raise BridgeClientError(msg)
+            raise BridgeClientError("Bridge response must contain both type and id")
 
         label_raw = payload.get("label")
         label = str(label_raw).strip() if label_raw is not None else None
@@ -47,7 +48,7 @@ class BlockedObject:
 
 @dataclass(frozen=True)
 class SyncResult:
-    """Результат синхронизации блоков."""
+    """Counters produced by blocked-object sync."""
 
     raw_created: int
     raw_updated: int
@@ -60,9 +61,10 @@ def _reason_for(blocked: BlockedObject) -> str:
 
 
 def _normalize_datetime(value: datetime) -> datetime:
-    if value.tzinfo:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+    normalized = ensure_utc(value)
+    if normalized is None:
+        raise ValueError("datetime value is required")
+    return normalized
 
 
 def upsert_raw_block(
@@ -70,7 +72,7 @@ def upsert_raw_block(
     blocked: BlockedObject,
     seen_at: datetime,
 ) -> tuple[RoonBlockRaw, bool]:
-    """Создаёт или обновляет запись roon_blocks_raw, сохраняя first_seen_at."""
+    """Insert or update roon_blocks_raw while preserving first_seen_at."""
 
     existing = session.scalar(
         select(RoonBlockRaw).where(
@@ -101,7 +103,7 @@ def upsert_block_candidate(
     seen_at: datetime,
     grace_period_days: int = BLOCK_GRACE_DAYS_DEFAULT,
 ) -> tuple[BlockCandidate, bool]:
-    """Создаёт или обновляет кандидата на действие по блоку."""
+    """Insert or update a block candidate."""
 
     existing = session.scalar(
         select(BlockCandidate).where(
@@ -139,7 +141,7 @@ def mark_restored_candidates(
     active_keys: set[tuple[str, str]],
     restored_at: datetime,
 ) -> list[BlockCandidate]:
-    """Переводит кандидатов в статус restored, если блоки исчезли в Roon."""
+    """Mark candidates as restored when the corresponding block disappears."""
 
     normalized_restored = _normalize_datetime(restored_at)
     restored: list[BlockCandidate] = []
@@ -164,14 +166,9 @@ def sync_blocked_objects(
     grace_period_days: int = BLOCK_GRACE_DAYS_DEFAULT,
     seen_at: datetime | None = None,
 ) -> SyncResult:
-    """Сохраняет сырые блоки и обновляет таблицу кандидатов.
+    """Persist raw blocks and refresh the candidate table."""
 
-    Наследование artist→album→track пока не разворачивается, так как нет доступа
-    к каталожным данным Roon в текущей интеграции. Обрабатываются только те
-    объекты, что вернул bridge.
-    """
-
-    timestamp = _normalize_datetime(seen_at or datetime.now(timezone.utc))
+    timestamp = _normalize_datetime(seen_at or utc_now())
     active_keys: set[tuple[str, str]] = set()
     raw_created = 0
     raw_updated = 0
@@ -212,37 +209,36 @@ def fetch_blocked_from_bridge(
     base_url: str | None = None,
     timeout: float = 5.0,
 ) -> list[BlockedObject]:
-    """Получает список заблокированных объектов из bridge."""
+    """Fetch blocked objects from the bridge."""
 
     bridge_base = (
         base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
     )
     url = f"{bridge_base.rstrip('/')}/blocked"
-    request = Request(url, headers={"Accept": "application/json"})
+    request = Request(url, headers=build_bridge_headers(accept="application/json"))
 
     try:
         with urlopen(
             request, timeout=timeout
-        ) as response:  # noqa: S310 - контролируемый URL
+        ) as response:  # noqa: S310 - controlled URL source
             payload = response.read().decode("utf-8")
             if response.status == 501:
-                raise BridgeClientError("Bridge не поддерживает /blocked (501)")
+                raise BridgeClientError("Bridge does not implement /blocked (501)")
             if response.status != 200:
                 raise BridgeClientError(
-                    f"Bridge вернул статус {response.status} для /blocked"
+                    f"Bridge returned status {response.status} for /blocked"
                 )
     except (HTTPError, URLError, TimeoutError) as exc:
-        raise BridgeClientError(f"Не удалось получить /blocked: {exc}") from exc
+        raise BridgeClientError(f"Could not fetch /blocked: {exc}") from exc
 
-    import json  # локальный импорт, чтобы не нагружать старты CLI
+    import json
 
     try:
         parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:  # pragma: no cover - неожиданный ответ
-        raise BridgeClientError(f"Некорректный JSON от bridge: {exc}") from exc
+    except json.JSONDecodeError as exc:  # pragma: no cover - unexpected response
+        raise BridgeClientError(f"Invalid bridge JSON: {exc}") from exc
 
     if not isinstance(parsed, list):
-        msg = "Ожидался массив объектов в /blocked"
-        raise BridgeClientError(msg)
+        raise BridgeClientError("Expected a JSON array from /blocked")
 
     return [BlockedObject.from_dict(item) for item in parsed]

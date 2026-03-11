@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -11,18 +11,19 @@ from urllib.request import Request, urlopen
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .bridge_auth import build_bridge_headers
 from .db.models import File, RoonItemCache
 
 DEFAULT_BRIDGE_HTTP_URL = "http://localhost:8080"
 
 
 class BridgeClientError(Exception):
-    """Ошибка при обращении к HTTP-эндпоинтам bridge."""
+    """Raised when bridge HTTP requests fail."""
 
 
 @dataclass(frozen=True)
 class RoonTrack:
-    """Нормализованный ответ bridge для трека Roon."""
+    """Normalized track payload returned by the bridge."""
 
     roon_track_id: str
     artist: str | None
@@ -33,14 +34,14 @@ class RoonTrack:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RoonTrack":
-        """Создаёт объект из JSON-ответа bridge."""
+        """Create a normalized track object from bridge JSON."""
 
         try:
             roon_track_id = str(payload["roon_track_id"]).strip()
         except Exception as exc:
-            raise BridgeClientError("Ответ bridge не содержит roon_track_id") from exc
+            raise BridgeClientError("Bridge response does not contain roon_track_id") from exc
         if not roon_track_id:
-            raise BridgeClientError("Поле roon_track_id пустое")
+            raise BridgeClientError("roon_track_id must not be empty")
 
         duration_ms = cls._parse_optional_int(payload.get("duration_ms"))
         track_number = cls._parse_optional_int(
@@ -63,14 +64,12 @@ class RoonTrack:
         try:
             return int(value)
         except (TypeError, ValueError) as exc:
-            raise BridgeClientError(
-                f"Невозможно привести значение к int: {value}"
-            ) from exc
+            raise BridgeClientError(f"Could not parse integer value: {value}") from exc
 
 
 @dataclass(frozen=True)
 class FileCandidate:
-    """Подходящий файл из аудиотеки."""
+    """Library file candidate matched against a Roon track."""
 
     file_id: int
     path: str
@@ -78,7 +77,7 @@ class FileCandidate:
 
 @dataclass(frozen=True)
 class MappingResult:
-    """Результат сопоставления трека Roon с файлами аудиотеки."""
+    """Metadata-based match result for a Roon track."""
 
     confidence: Literal["high", "low"]
     candidates: Sequence[FileCandidate]
@@ -89,31 +88,31 @@ def fetch_track_from_bridge(
     base_url: str | None = None,
     timeout: float = 5.0,
 ) -> RoonTrack:
-    """Получает нормализованные данные трека из bridge по HTTP."""
+    """Fetch normalized track metadata from the bridge via HTTP."""
 
     bridge_base = (
         base_url or os.environ.get("HSAJ_BRIDGE_HTTP") or DEFAULT_BRIDGE_HTTP_URL
     )
     url = f"{bridge_base.rstrip('/')}/track/{quote(roon_track_id)}"
-    request = Request(url, headers={"Accept": "application/json"})
+    request = Request(url, headers=build_bridge_headers(accept="application/json"))
 
     try:
         with urlopen(request, timeout=timeout) as response:
             if response.status != 200:
                 raise BridgeClientError(
-                    f"Bridge вернул статус {response.status} для {roon_track_id}"
+                    f"Bridge returned status {response.status} for {roon_track_id}"
                 )
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError) as exc:
         raise BridgeClientError(
-            f"Не удалось получить трек {roon_track_id}: {exc}"
+            f"Could not fetch track {roon_track_id}: {exc}"
         ) from exc
 
     return RoonTrack.from_dict(payload)
 
 
 def cache_roon_track(session: Session, track: RoonTrack) -> RoonItemCache:
-    """Сохраняет трек Roon в кэш (insert или update)."""
+    """Insert or update a Roon track in the cache."""
 
     existing = session.execute(
         select(RoonItemCache).where(RoonItemCache.roon_track_id == track.roon_track_id)
@@ -143,7 +142,7 @@ def match_track_by_metadata(
     track: RoonTrack,
     duration_tolerance_seconds: int = 2,
 ) -> MappingResult:
-    """Сопоставляет трек по artist/album/title/track_number и длительности."""
+    """Match a track by artist, album, title, track number, and duration."""
 
     filters = []
 

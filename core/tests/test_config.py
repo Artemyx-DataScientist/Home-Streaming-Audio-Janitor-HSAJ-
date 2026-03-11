@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -17,6 +17,9 @@ database:
 paths:
   library_roots:
     - ./music
+  scan_exclude_dirs:
+    - ./music/_tmp
+  scan_batch_size: 50
 """
     )
 
@@ -30,6 +33,10 @@ paths:
     assert loaded.config.paths.library_roots == [
         (config_path.parent / "music").resolve()
     ]
+    assert loaded.config.paths.scan_exclude_dirs == [
+        (config_path.parent / "music/_tmp").resolve()
+    ]
+    assert loaded.config.paths.scan_batch_size == 50
 
 
 def test_load_config_empty_file(tmp_path: Path) -> None:

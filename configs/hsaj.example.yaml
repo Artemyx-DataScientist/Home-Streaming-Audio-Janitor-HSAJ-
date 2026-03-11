@@ -1,18 +1,22 @@
-# Пример конфигурации HSAJ
-# Скопируйте этот файл в configs/hsaj.yaml и отредактируйте под себя.
+﻿# Example HSAJ configuration
+# Copy this file to configs/hsaj.yaml and adjust it for your environment.
 
 database:
   driver: sqlite
-  # Путь до файла SQLite. Можно указать абсолютный или относительный к этому файлу.
   path: ./data/hsaj.db
 
 paths:
-  # Список корневых директорий аудиотеки.
   library_roots:
     - /mnt/music
-  # Куда складывать файлы с Dolby Atmos (опционально).
   atmos_dir: /mnt/music_atmos
-  # Карантин для удаляемых файлов (опционально).
   quarantine_dir: /mnt/music/_quarantine_delete
-  # Входящая директория для новых файлов (опционально).
   inbox_dir: /mnt/music_inbox
+  scan_extensions:
+    - flac
+    - mp3
+    - m4a
+    - wav
+  scan_exclude_dirs:
+    - /mnt/music/_incoming
+    - /mnt/music/_tmp
+  scan_batch_size: 200

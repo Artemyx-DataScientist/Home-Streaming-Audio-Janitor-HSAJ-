@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
@@ -13,10 +13,6 @@ def _session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return Session(engine)
-
-
-def _naive(dt: datetime) -> datetime:
-    return dt.replace(tzinfo=None)
 
 
 def test_upsert_raw_block_preserves_first_seen() -> None:
@@ -38,8 +34,8 @@ def test_upsert_raw_block_preserves_first_seen() -> None:
         assert created_second is False
 
         record = session.scalars(select(RoonBlockRaw)).one()
-        assert record.first_seen_at == _naive(seen_at)
-        assert record.last_seen_at == _naive(later)
+        assert record.first_seen_at == seen_at
+        assert record.last_seen_at == later
 
 
 def test_sync_blocked_creates_candidate_with_planned_action() -> None:
@@ -58,10 +54,8 @@ def test_sync_blocked_creates_candidate_with_planned_action() -> None:
 
         assert result.candidates_created == 1
         candidate = session.scalars(select(BlockCandidate)).one()
-        assert candidate.first_seen_at == _naive(seen_at)
-        assert candidate.planned_action_at == _naive(
-            seen_at + timedelta(days=grace_days)
-        )
+        assert candidate.first_seen_at == seen_at
+        assert candidate.planned_action_at == seen_at + timedelta(days=grace_days)
         assert candidate.reason == "blocked_by_album"
         assert candidate.status == "planned"
 
@@ -91,9 +85,9 @@ def test_sync_blocked_does_not_shift_planned_on_repeat_sync() -> None:
         session.commit()
 
         candidate = session.scalars(select(BlockCandidate)).one()
-        assert candidate.first_seen_at == _naive(first_seen)
-        assert candidate.planned_action_at == _naive(first_seen + timedelta(days=7))
-        assert candidate.last_seen_at == _naive(later_seen)
+        assert candidate.first_seen_at == first_seen
+        assert candidate.planned_action_at == first_seen + timedelta(days=7)
+        assert candidate.last_seen_at == later_seen
 
 
 def test_sync_blocked_marks_restored_when_missing() -> None:
@@ -121,6 +115,6 @@ def test_sync_blocked_marks_restored_when_missing() -> None:
 
         candidate = session.scalars(select(BlockCandidate)).one()
         assert candidate.status == "restored"
-        assert candidate.restored_at == _naive(later)
+        assert candidate.restored_at == later
         assert candidate.planned_action_at is None
-        assert candidate.last_seen_at == _naive(later)
+        assert candidate.last_seen_at == later

@@ -1,13 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 # ruff: noqa: B008
 import asyncio
 import os
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import typer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .blocking import (
@@ -17,17 +18,31 @@ from .blocking import (
 )
 from .config import ConfigError, LoadedConfig, find_config_path, load_config
 from .db import database_status, init_database
+from .db.models import BlockCandidate, RoonItemCache
 from .executor import apply_plan, restore_from_quarantine
 from .planner import build_plan
-from .roon import BridgeClientError
+from .roon import (
+    BridgeClientError,
+    cache_roon_track,
+    fetch_track_from_bridge,
+)
 from .scanner import scan_library
+from .timeutils import utc_now
 from .transport import DEFAULT_BRIDGE_WS_URL, TransportEventProcessor, listen_to_bridge
 
-app = typer.Typer(help="Домашнее ядро HSAJ")
-db_app = typer.Typer(help="Операции с БД")
-roon_app = typer.Typer(help="Интеграция с Roon")
+app = typer.Typer(help="HSAJ core CLI")
+db_app = typer.Typer(help="Database operations")
+roon_app = typer.Typer(help="Roon integration")
 app.add_typer(db_app, name="db")
 app.add_typer(roon_app, name="roon")
+
+
+@dataclass(slots=True)
+class TrackCacheWarmupResult:
+    total: int = 0
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
 
 
 def _load_config_or_exit(config_path: Optional[Path]) -> Path:
@@ -46,60 +61,91 @@ def _read_config_or_exit(config_path: Path) -> LoadedConfig:
         raise typer.Exit(code=1) from exc
 
 
-@db_app.command("init", help="Создать SQLite и прогнать миграции")
+def _warm_track_cache(
+    session: Session,
+    *,
+    bridge_url: str | None,
+) -> TrackCacheWarmupResult:
+    track_ids = session.scalars(
+        select(BlockCandidate.object_id)
+        .where(
+            BlockCandidate.object_type == "track",
+            BlockCandidate.status == "planned",
+        )
+        .order_by(BlockCandidate.id.asc())
+    ).all()
+    unique_track_ids = list(dict.fromkeys(track_ids))
+
+    result = TrackCacheWarmupResult(total=len(unique_track_ids))
+    for track_id in unique_track_ids:
+        try:
+            track = fetch_track_from_bridge(track_id, base_url=bridge_url)
+        except BridgeClientError:
+            result.failed += 1
+            continue
+        existing = session.get(RoonItemCache, track.roon_track_id)
+        cache_roon_track(session, track)
+        if existing is None:
+            result.created += 1
+        else:
+            result.updated += 1
+    return result
+
+
+@db_app.command("init", help="Create SQLite DB and apply migrations")
 def db_init(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
     _, version = init_database(loaded.config.database)
-    typer.echo(f"База готова. Текущая версия: {version or 'нет применённых миграций'}")
+    typer.echo(f"Database ready. Current version: {version or 'no migrations applied'}")
 
 
-@db_app.command("status", help="Показать текущую версию схемы")
+@db_app.command("status", help="Show current schema version")
 def db_status(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
     version = database_status(loaded.config.database)
     if version is None:
-        typer.echo("База ещё не инициализирована или миграции не применялись.")
+        typer.echo("Database is not initialized yet or no migrations have been applied.")
     else:
-        typer.echo(f"Текущая версия схемы: {version}")
+        typer.echo(f"Current schema version: {version}")
 
 
-@app.command(
-    "scan", help="Просканировать директории библиотеки и обновить таблицу files"
-)
+@app.command("scan", help="Scan library roots and refresh the files table")
 def scan_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Только вывод статистики без записи в БД",
-    ),  # noqa: B008
+        help="Only print statistics without writing to the DB",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
     if not loaded.config.paths.library_roots:
         typer.secho(
-            "В конфиге не заданы paths.library_roots", err=True, fg=typer.colors.RED
+            "paths.library_roots is not configured",
+            err=True,
+            fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
 
@@ -107,26 +153,29 @@ def scan_command(
     summary = scan_library(
         engine=engine,
         library_roots=loaded.config.paths.library_roots,
+        allowed_extensions=loaded.config.paths.scan_extensions,
+        excluded_dirs=loaded.config.paths.scan_exclude_dirs,
+        batch_size=loaded.config.paths.scan_batch_size,
         dry_run=dry_run,
     )
 
     if dry_run:
-        typer.echo(f"Найдено файлов: {summary.found_files}")
+        typer.echo(f"Found files: {summary.found_files}")
     else:
         typer.echo(
-            "Сканирование завершено. "
-            f"Новых: {summary.created}, обновлено: {summary.updated}, пропущено: {summary.skipped}"
+            "Scan completed. "
+            f"Created: {summary.created}, updated: {summary.updated}, skipped: {summary.skipped}"
         )
 
 
-@app.command("plan", help="Показать запланированные действия (перенос Atmos)")
+@app.command("plan", help="Show the current action plan")
 def plan_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
@@ -143,18 +192,18 @@ def plan_command(
             plan.low_confidence,
         )
     ):
-        typer.echo("План пуст — нечего делать.")
+        typer.echo("Plan is empty.")
         typer.echo(plan.to_json())
         return
 
-    typer.echo("План действий:")
+    typer.echo("Action plan:")
     if plan.atmos_moves:
-        typer.echo("Atmos (перемещение):")
+        typer.echo("Atmos moves:")
         for move in plan.atmos_moves:
             typer.echo(f"- file_id={move.file_id}: {move.source} -> {move.destination}")
 
     if plan.blocked_quarantine_due:
-        typer.echo("Карантин (срок наступил):")
+        typer.echo("Blocked quarantine due now:")
         for move in plan.blocked_quarantine_due:
             typer.echo(
                 f"- candidate_id={move.candidate_id} file_id={move.file_id}: "
@@ -162,7 +211,7 @@ def plan_command(
             )
 
     if plan.blocked_quarantine_future:
-        typer.echo("Карантин (ещё не наступил):")
+        typer.echo("Blocked quarantine scheduled for later:")
         for move in plan.blocked_quarantine_future:
             typer.echo(
                 f"- candidate_id={move.candidate_id} file_id={move.file_id}: "
@@ -170,30 +219,30 @@ def plan_command(
             )
 
     if plan.low_confidence:
-        typer.echo("Низкая уверенность (нужно вмешательство):")
+        typer.echo("Low-confidence matches:")
         for item in plan.low_confidence:
             typer.echo(
                 f"- candidate_id={item.candidate_id} {item.object_type}:{item.object_id} "
                 f"files={item.matched_file_ids or '[]'} reason={item.reason}"
             )
 
-    typer.echo("JSON-представление плана:")
+    typer.echo("Plan JSON:")
     typer.echo(plan.to_json())
 
 
-@app.command("apply", help="Применить план (перенос Atmos в целевой каталог)")
+@app.command("apply", help="Apply the current plan")
 def apply_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Только логировать действия без изменений",
-    ),  # noqa: B008
+        help="Log the plan but do not move files",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
@@ -206,23 +255,23 @@ def apply_command(
         )
 
     if dry_run:
-        typer.echo("dry_run: действия не выполнялись, записана строчка в actions_log")
+        typer.echo("dry_run: no files were changed; plan and dry_run entries were logged")
         return
 
     typer.echo(
-        f"Применено. Atmos: {len(result.applied_atmos)}, в карантин: {len(result.quarantined)}, "
-        f"пропущено: {len(result.skipped)}"
+        f"Applied. Atmos: {len(result.applied_atmos)}, quarantined: {len(result.quarantined)}, "
+        f"skipped: {len(result.skipped)}"
     )
 
 
-@app.command("listen", help="Подключиться к bridge и собирать события воспроизведения")
+@app.command("listen", help="Connect to the bridge and collect playback events")
 def listen_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
@@ -238,27 +287,32 @@ def listen_command(
     try:
         asyncio.run(listen_to_bridge(ws_url=ws_url, processor=processor))
     except KeyboardInterrupt:
-        typer.echo("Отключение от bridge по Ctrl+C")
+        typer.echo("Disconnected from bridge")
 
 
-@roon_app.command("sync", help="Синхронизировать блоки из Roon и обновить кандидатов")
+@roon_app.command("sync", help="Sync blocked objects from Roon and refresh candidates")
 def roon_sync_command(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
     bridge_url: Optional[str] = typer.Option(
         None,
         "--bridge-url",
-        help="HTTP URL bridge (по умолчанию переменные окружения или http://localhost:8080)",
-    ),  # noqa: B008
+        help="Bridge HTTP URL (default: HSAJ_BRIDGE_HTTP or http://localhost:8080)",
+    ),
     grace_days: int = typer.Option(
         BLOCK_GRACE_DAYS_DEFAULT,
         "--grace-days",
-        help="Сколько дней ждать после первого обнаружения блока",
-    ),  # noqa: B008
+        help="Days to wait after first seeing a block before action is due",
+    ),
+    cache_tracks: bool = typer.Option(
+        False,
+        "--cache-tracks",
+        help="Warm RoonItemCache for planned track blocks via /track/{id}",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
@@ -270,32 +324,42 @@ def roon_sync_command(
         raise typer.Exit(code=1) from exc
 
     engine, _ = init_database(loaded.config.database)
+    cache_result = TrackCacheWarmupResult()
     with Session(engine) as session:
         result = sync_blocked_objects(
             session=session,
             blocked_items=blocked,
             grace_period_days=grace_days,
-            seen_at=datetime.now(timezone.utc),
+            seen_at=utc_now(),
         )
+
+        if cache_tracks:
+            cache_result = _warm_track_cache(session=session, bridge_url=bridge_url)
         session.commit()
 
     typer.echo(
-        "Синхронизация блоков завершена. "
-        f"Сырых блоков: {len(blocked)}; создано raw: {result.raw_created}; "
-        f"обновлено raw: {result.raw_updated}; новые кандидаты: {result.candidates_created}; "
-        f"снято блоков: {result.candidates_restored}"
+        "Blocked-object sync completed. "
+        f"Raw blocks: {len(blocked)}; raw created: {result.raw_created}; "
+        f"raw updated: {result.raw_updated}; candidates created: {result.candidates_created}; "
+        f"candidates restored: {result.candidates_restored}"
     )
+    if cache_tracks:
+        typer.echo(
+            "RoonItemCache warmup: "
+            f"track ids: {cache_result.total}; created: {cache_result.created}; "
+            f"updated: {cache_result.updated}; failed: {cache_result.failed}"
+        )
 
 
-@app.command("restore", help="Восстановить файл из карантина по пути или file_id")
+@app.command("restore", help="Restore a file from quarantine by path or file_id")
 def restore_command(
     target: str,
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="Путь к hsaj.yaml",
-    ),  # noqa: B008
+        help="Path to hsaj.yaml",
+    ),
 ) -> None:
     resolved_path = _load_config_or_exit(config)
     loaded = _read_config_or_exit(resolved_path)
@@ -311,17 +375,13 @@ def restore_command(
         result = restore_from_quarantine(session=session, target=target_path)
 
     if result.conflict:
-        typer.echo(
-            "Конфликт восстановления: целевой путь уже существует, операция отменена"
-        )
+        typer.echo("Restore conflict: destination already exists, operation aborted")
         return
     if result.restored_path is None:
-        typer.echo(
-            "Не удалось найти запись о карантине или файл, восстановление не выполнено"
-        )
+        typer.echo("Could not find a quarantine record or file to restore")
         return
 
-    typer.echo(f"Файл восстановлен: {result.original_path}")
+    typer.echo(f"Restored file: {result.original_path}")
 
 
 if __name__ == "__main__":

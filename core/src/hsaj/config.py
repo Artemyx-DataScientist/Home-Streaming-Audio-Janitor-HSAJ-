@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -15,28 +15,25 @@ DEFAULT_CONFIG_CANDIDATES = (
 
 
 class ConfigError(Exception):
-    """Ошибка чтения или валидации конфига HSAJ."""
+    """Raised when reading or validating HSAJ config fails."""
 
 
 class DatabaseConfig(BaseModel):
-    """Настройки базы данных."""
+    """Database settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     driver: str = Field(
         default="sqlite",
-        description="Тип драйвера. Пока поддерживается только sqlite",
+        description="Database driver. Only sqlite is supported right now.",
     )
-    path: Path = Field(..., description="Путь к файлу БД или DSN")
+    path: Path = Field(..., description="Path to the database file or DSN.")
 
     @field_validator("driver")
     @classmethod
     def ensure_supported_driver(cls, value: str) -> str:
         if value != "sqlite":
-            msg = (
-                "Поддерживается только драйвер 'sqlite'. "
-                "Укажите driver: sqlite в конфиге hsaj.yaml."
-            )
+            msg = "Only the 'sqlite' driver is supported. Set driver: sqlite in hsaj.yaml."
             raise ConfigError(msg)
         return value
 
@@ -47,15 +44,55 @@ class DatabaseConfig(BaseModel):
 
 
 class PathsConfig(BaseModel):
-    """Пути, используемые ядром."""
+    """Filesystem paths and scanner settings used by the core."""
 
     model_config = ConfigDict(extra="forbid")
 
-    library_roots: list[Path] = Field(default_factory=list, description="Директории аудиотеки")
-    quarantine_dir: Optional[Path] = Field(default=None, description="Путь для карантина удалений")
-    atmos_dir: Optional[Path] = Field(default=None, description="Путь для Atmos файлов")
-    inbox_dir: Optional[Path] = Field(default=None, description="Входящая директория")
-    ffprobe_path: str = Field(default="ffprobe", description="Путь к бинарю ffprobe")
+    library_roots: list[Path] = Field(
+        default_factory=list,
+        description="Library root directories.",
+    )
+    quarantine_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory used for quarantine moves.",
+    )
+    atmos_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory used for Atmos files.",
+    )
+    inbox_dir: Optional[Path] = Field(
+        default=None,
+        description="Inbox directory.",
+    )
+    scan_extensions: list[str] = Field(
+        default_factory=lambda: [
+            "aac",
+            "aiff",
+            "alac",
+            "dsf",
+            "flac",
+            "m4a",
+            "mp3",
+            "ogg",
+            "opus",
+            "wav",
+            "wma",
+        ],
+        description="Allowed file extensions for the scanner.",
+    )
+    scan_exclude_dirs: list[Path] = Field(
+        default_factory=list,
+        description="Directories that the scanner should skip.",
+    )
+    scan_batch_size: int = Field(
+        default=200,
+        ge=1,
+        description="Number of scanned files between DB commits.",
+    )
+    ffprobe_path: str = Field(
+        default="ffprobe",
+        description="Path to the ffprobe binary.",
+    )
 
     @field_validator("library_roots", mode="before")
     @classmethod
@@ -73,17 +110,35 @@ class PathsConfig(BaseModel):
             return None
         return Path(value)
 
+    @field_validator("scan_extensions", mode="before")
+    @classmethod
+    def normalize_scan_extensions(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
+    @field_validator("scan_exclude_dirs", mode="before")
+    @classmethod
+    def normalize_scan_exclude_dirs(cls, value: Any) -> list[Path]:
+        if value is None:
+            return []
+        if isinstance(value, (str, Path)):
+            return [Path(value)]
+        return [Path(item) for item in value]
+
     @field_validator("ffprobe_path")
     @classmethod
     def normalize_ffprobe_path(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
-            raise ConfigError("paths.ffprobe_path не может быть пустым")
+            raise ConfigError("paths.ffprobe_path must not be empty")
         return str(Path(cleaned).expanduser())
 
 
 class HsajConfig(BaseModel):
-    """Корневой конфиг HSAJ."""
+    """Root HSAJ config model."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -91,7 +146,7 @@ class HsajConfig(BaseModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
     def resolve_relative_paths(self, base_path: Path) -> "HsajConfig":
-        """Возвращает копию конфига с путями, разрешёнными относительно config файла."""
+        """Return a copy with paths resolved relative to the config file."""
 
         def _resolve(path_value: Optional[Path]) -> Optional[Path]:
             if path_value is None:
@@ -109,6 +164,10 @@ class HsajConfig(BaseModel):
         resolved_paths.quarantine_dir = _resolve(resolved_paths.quarantine_dir)
         resolved_paths.atmos_dir = _resolve(resolved_paths.atmos_dir)
         resolved_paths.inbox_dir = _resolve(resolved_paths.inbox_dir)
+        resolved_paths.scan_exclude_dirs = [
+            excluded if excluded.is_absolute() else (base_path / excluded).resolve()
+            for excluded in resolved_paths.scan_exclude_dirs
+        ]
 
         ffprobe_candidate = Path(resolved_paths.ffprobe_path)
         if ffprobe_candidate.is_absolute():
@@ -121,34 +180,34 @@ class HsajConfig(BaseModel):
 
 @dataclass
 class LoadedConfig:
-    """Результат чтения конфига, включая путь к исходному файлу."""
+    """Loaded config paired with its source path."""
 
     config: HsajConfig
     source_path: Path
 
 
 def load_config(config_path: Path) -> LoadedConfig:
-    """Читает YAML-конфиг и валидирует его через Pydantic."""
+    """Read YAML config and validate it with Pydantic."""
 
     if not config_path.exists():
-        raise ConfigError(f"Конфиг не найден: {config_path}")
+        raise ConfigError(f"Config not found: {config_path}")
 
     try:
         raw = yaml.safe_load(config_path.read_text())
     except yaml.YAMLError as exc:
-        raise ConfigError(f"Не удалось распарсить YAML: {exc}") from exc
+        raise ConfigError(f"Could not parse YAML: {exc}") from exc
     if raw is None:
-        raise ConfigError("Файл конфига пустой или содержит только комментарии.")
+        raise ConfigError("Config file is empty or contains comments only.")
 
     try:
         parsed = HsajConfig.model_validate(raw)
     except ValidationError as exc:
         human_errors = "; ".join(err["msg"] for err in exc.errors())
-        raise ConfigError(f"Конфиг некорректен: {human_errors}") from exc
+        raise ConfigError(f"Invalid config: {human_errors}") from exc
     except ConfigError:
         raise
-    except Exception as exc:  # pragma: no cover - защита от неожиданных ошибок
-        raise ConfigError(f"Неизвестная ошибка чтения конфига: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive wrapper
+        raise ConfigError(f"Unexpected config error: {exc}") from exc
 
     return LoadedConfig(
         config=parsed.resolve_relative_paths(config_path.parent),
@@ -157,7 +216,7 @@ def load_config(config_path: Path) -> LoadedConfig:
 
 
 def find_config_path(explicit: Optional[Path]) -> Path:
-    """Ищет конфиг hsaj.yaml по приоритету: CLI → переменная окружения → дефолтные пути."""
+    """Locate hsaj.yaml using CLI, env vars, then default paths."""
 
     if explicit is not None:
         return explicit
@@ -173,6 +232,5 @@ def find_config_path(explicit: Optional[Path]) -> Path:
             return candidate
 
     raise ConfigError(
-        "Конфиг не найден. Передайте путь через --config, переменную окружения HSAJ_CONFIG "
-        "или создайте configs/hsaj.yaml."
+        "Config not found. Pass --config, set HSAJ_CONFIG, or create configs/hsaj.yaml."
     )

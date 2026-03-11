@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,18 +157,19 @@ def test_apply_plan_moves_to_quarantine_and_logs(tmp_path: Path) -> None:
         assert refreshed_file is not None
         assert refreshed_file.path == str(destination)
 
-        log_entry = (
+        plan_log = session.query(ActionLog).filter(ActionLog.action == "plan").one()
+        quarantine_log = (
             session.query(ActionLog).filter(ActionLog.action == "quarantine_move").one()
         )
-        assert "candidate_id" in (log_entry.details or "")
+        assert '"blocked_quarantine_due"' in (plan_log.details or "")
+        assert "candidate_id" in (quarantine_log.details or "")
 
-        # повторный запуск не должен дублировать действия
         second_plan = _build_plan(session, config)
         second_result = apply_plan(session=session, config=config, plan=second_plan)
         assert not second_result.quarantined
 
 
-def test_apply_plan_dry_run_logs_only(tmp_path: Path) -> None:
+def test_apply_plan_dry_run_logs_plan_and_dry_run(tmp_path: Path) -> None:
     config = _base_config(tmp_path)
     engine, _ = init_database(config.database)
 
@@ -191,9 +192,8 @@ def test_apply_plan_dry_run_logs_only(tmp_path: Path) -> None:
         plan = _build_plan(session, config)
         result = apply_plan(session=session, config=config, plan=plan, dry_run=True)
         assert result.dry_run is True
-        assert (
-            session.query(ActionLog).filter(ActionLog.action == "dry_run").count() == 1
-        )
+        assert session.query(ActionLog).filter(ActionLog.action == "plan").count() == 1
+        assert session.query(ActionLog).filter(ActionLog.action == "dry_run").count() == 1
         destination = (
             config.paths.quarantine_dir / "2024-01-10" / "Artist/Album/track.flac"
         )
@@ -229,7 +229,6 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         )
         assert destination.exists()
 
-        # конфликт: оригинал уже существует
         original_path = config.paths.library_roots[0] / "Artist/Album/track.flac"
         original_path.parent.mkdir(parents=True, exist_ok=True)
         original_path.write_text("conflict")
@@ -239,7 +238,6 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         )
         assert conflict_result.conflict is True
 
-        # успешное восстановление после удаления конфликта
         original_path.unlink()
         success_result = restore_from_quarantine(session=session, target=source_file.id)
         assert success_result.conflict is False
@@ -247,3 +245,4 @@ def test_restore_handles_conflicts(tmp_path: Path) -> None:
         refreshed_candidate = session.query(BlockCandidate).first()
         assert refreshed_candidate is not None
         assert refreshed_candidate.status == "restored"
+
