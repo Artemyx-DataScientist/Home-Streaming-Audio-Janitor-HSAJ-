@@ -20,6 +20,7 @@ from .models import (
     ReviewDecision,
     RoonBlockRaw,
     RoonItemCache,
+    RuntimeJobStatus,
 )
 
 MigrationCallable = Callable[[Connection], None]
@@ -213,6 +214,10 @@ def _migration_v10(conn: Connection) -> None:
     BridgeSyncStatus.__table__.create(bind=conn, checkfirst=True)
 
 
+def _migration_v11(conn: Connection) -> None:
+    RuntimeJobStatus.__table__.create(bind=conn, checkfirst=True)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version="0001_initial",
@@ -263,6 +268,11 @@ MIGRATIONS: list[Migration] = [
         version="0010_bridge_sync_status",
         description="Add persisted bridge sync freshness and status tracking",
         upgrade=_migration_v10,
+    ),
+    Migration(
+        version="0011_runtime_job_status",
+        description="Add persisted runtime job status tracking for background scheduler",
+        upgrade=_migration_v11,
     ),
 ]
 

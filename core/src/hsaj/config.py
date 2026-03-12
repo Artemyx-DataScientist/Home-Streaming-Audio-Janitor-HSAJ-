@@ -228,6 +228,35 @@ class ObservabilityConfig(BaseModel):
     )
 
 
+class RuntimeConfig(BaseModel):
+    """Background runtime settings for scheduled core jobs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enable_background_jobs: bool = Field(
+        default=False,
+        description="Run background blocked-sync and cleanup jobs inside hsaj serve.",
+    )
+    blocked_sync_interval_minutes: int = Field(
+        default=15,
+        ge=1,
+        description="How often to refresh blocked objects from the bridge.",
+    )
+    cleanup_interval_minutes: int = Field(
+        default=60,
+        ge=1,
+        description="How often to run quarantine retention cleanup.",
+    )
+    blocked_sync_on_start: bool = Field(
+        default=True,
+        description="Run blocked sync once when the runtime scheduler starts.",
+    )
+    cleanup_on_start: bool = Field(
+        default=True,
+        description="Run cleanup once when the runtime scheduler starts.",
+    )
+
+
 class HsajConfig(BaseModel):
     """Root HSAJ config model."""
 
@@ -239,6 +268,7 @@ class HsajConfig(BaseModel):
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     def resolve_relative_paths(self, base_path: Path) -> "HsajConfig":
         """Return a copy with paths resolved relative to the config file."""

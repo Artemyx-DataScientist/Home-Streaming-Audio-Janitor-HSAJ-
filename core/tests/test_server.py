@@ -17,6 +17,7 @@ from hsaj.config import (
     HsajConfig,
     ObservabilityConfig,
     PathsConfig,
+    RuntimeConfig,
     SecurityConfig,
 )
 from hsaj.db import init_database
@@ -31,7 +32,12 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _config(tmp_path: Path, *, token: str | None = None) -> HsajConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    token: str | None = None,
+    runtime_enabled: bool = False,
+) -> HsajConfig:
     return HsajConfig(
         database=DatabaseConfig(driver="sqlite", path=tmp_path / "hsaj.db"),
         paths=PathsConfig(
@@ -46,6 +52,11 @@ def _config(tmp_path: Path, *, token: str | None = None) -> HsajConfig:
             operator_token=token,
         ),
         observability=ObservabilityConfig(),
+        runtime=RuntimeConfig(
+            enable_background_jobs=runtime_enabled,
+            blocked_sync_on_start=False,
+            cleanup_on_start=False,
+        ),
     )
 
 
@@ -271,6 +282,120 @@ def test_server_can_dismiss_soft_candidate(tmp_path: Path) -> None:
         status, soft_payload = _json_request("GET", f"{base_url}/soft-candidates")
         assert status == 200
         assert soft_payload == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_can_run_runtime_job_manually(tmp_path: Path) -> None:
+    config = _config(tmp_path, runtime_enabled=True)
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        status, jobs_payload = _json_request("GET", f"{base_url}/runtime-jobs")
+        assert status == 200
+        assert {item["job_name"] for item in jobs_payload} == {
+            "blocked_sync",
+            "cleanup_retention",
+        }
+
+        status, payload = _json_request(
+            "POST",
+            f"{base_url}/runtime-jobs/run",
+            body={"job_name": "cleanup_retention"},
+        )
+        assert status == 200
+        assert payload["job_name"] == "cleanup_retention"
+        assert payload["status"] == "ok"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_can_validate_stale_preview(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    library_file = config.paths.library_roots[0] / "Artist" / "Album" / "track.flac"
+    library_file.parent.mkdir(parents=True, exist_ok=True)
+    library_file.write_text("content")
+
+    from hsaj.db.models import BlockCandidate, RoonItemCache
+    from hsaj.exemptions import add_exemption
+
+    engine, _ = init_database(config.database)
+    with Session(engine) as session:
+        file_record = File(
+            path=str(library_file),
+            size_bytes=1,
+            format="flac",
+            mtime=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            artist="Artist",
+            album="Album",
+            title="Title",
+            track_number=1,
+            year=2024,
+            duration_seconds=300,
+        )
+        session.add(file_record)
+        session.add(
+            BlockCandidate(
+                object_type="track",
+                object_id="track-1",
+                label="Track",
+                metadata_json='{"artist":"Artist","album":"Album","title":"Title","track_number":1,"duration_ms":300000}',
+                reason="blocked_by_track",
+                status="planned",
+                source="bridge.blocked.v1",
+                rule_id="blocked_by_track",
+                first_seen_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                last_seen_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                planned_action_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                last_transition_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        session.add(
+            RoonItemCache(
+                roon_track_id="track-1",
+                artist="Artist",
+                album="Album",
+                title="Title",
+                track_number=1,
+                duration_ms=300000,
+            )
+        )
+        session.commit()
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        status, preview_payload = _json_request("GET", f"{base_url}/plan")
+        assert status == 200
+        assert preview_payload["validation"]["valid"] is True
+
+        with Session(engine) as session:
+            add_exemption(
+                session,
+                scope_type="path",
+                path=str(library_file),
+                reason="hold",
+            )
+            session.commit()
+
+        status, validation_payload = _json_request(
+            "POST",
+            f"{base_url}/plan/validate",
+            body={"preview_id": preview_payload["preview_id"]},
+        )
+        assert status == 200
+        assert validation_payload["validation"]["valid"] is False
+        assert validation_payload["validation"]["issues"][0]["code"] == "exempt"
     finally:
         server.shutdown()
         server.server_close()

@@ -29,9 +29,12 @@ from .operator_service import (
     readiness_payload,
     reviews_payload,
     restore_payload,
+    runtime_jobs_payload,
     soft_candidates_payload,
     stats_payload,
+    validate_preview_payload,
 )
+from .runtime_jobs import BackgroundScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ OPERATOR_HTML = """<!doctype html>
     <section>
       <h2>Plan Preview</h2>
       <button onclick="loadPlan()">Build Preview</button>
+      <button class="secondary" onclick="validatePreview()">Validate Preview</button>
       <button onclick="applyPreview()">Apply Preview</button>
       <pre id="plan"></pre>
     </section>
@@ -92,6 +96,14 @@ OPERATOR_HTML = """<!doctype html>
       <h2>Review History</h2>
       <pre id="reviews"></pre>
     </section>
+    <section>
+      <h2>Runtime Jobs</h2>
+      <div class="soft-actions">
+        <button onclick="runRuntimeJob('blocked_sync')">Run Blocked Sync</button>
+        <button class="secondary" onclick="runRuntimeJob('cleanup_retention')">Run Cleanup</button>
+      </div>
+      <pre id="runtime-jobs"></pre>
+    </section>
   </main>
   <script>
     let previewId = null;
@@ -106,6 +118,7 @@ OPERATOR_HTML = """<!doctype html>
       document.getElementById("candidates").textContent = JSON.stringify(await fetchJson("/candidates"), null, 2);
       document.getElementById("actions").textContent = JSON.stringify(await fetchJson("/actions"), null, 2);
       document.getElementById("reviews").textContent = JSON.stringify(await fetchJson("/reviews"), null, 2);
+      document.getElementById("runtime-jobs").textContent = JSON.stringify(await fetchJson("/runtime-jobs"), null, 2);
       await refreshSoftCandidates();
     }
     async function loadPlan() {
@@ -121,6 +134,14 @@ OPERATOR_HTML = """<!doctype html>
       });
       document.getElementById("plan").textContent = JSON.stringify(payload, null, 2);
       await refreshAll();
+    }
+    async function validatePreview() {
+      const payload = await fetchJson("/plan/validate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({preview_id: previewId}),
+      });
+      document.getElementById("plan").textContent = JSON.stringify(payload, null, 2);
     }
     async function refreshSoftCandidates() {
       const payload = await fetchJson("/soft-candidates");
@@ -181,6 +202,15 @@ OPERATOR_HTML = """<!doctype html>
       if (className) button.className = className;
       return button;
     }
+    async function runRuntimeJob(jobName) {
+      const payload = await fetchJson("/runtime-jobs/run", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({job_name: jobName}),
+      });
+      document.getElementById("runtime-jobs").textContent = JSON.stringify(payload, null, 2);
+      await refreshAll();
+    }
     refreshAll();
   </script>
 </body>
@@ -190,6 +220,13 @@ OPERATOR_HTML = """<!doctype html>
 
 def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
     engine, _ = init_database(config.database)
+    scheduler = (
+        BackgroundScheduler(engine=engine, config=config)
+        if config.runtime.enable_background_jobs
+        else None
+    )
+    if scheduler is not None:
+        scheduler.start()
     operator_token = (config.security.operator_token or "").strip() or None
     require_auth = operator_token is not None
     if require_auth and config.security.operator_host in {"127.0.0.1", "localhost", "::1"}:
@@ -249,6 +286,9 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
             if parsed.path == "/reviews":
                 self._with_session(reviews_payload)
                 return
+            if parsed.path == "/runtime-jobs":
+                self._with_session(lambda session: runtime_jobs_payload(session, config))
+                return
             if parsed.path == "/stats":
                 self._with_session(lambda session: stats_payload(session, config))
                 return
@@ -272,6 +312,15 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                     )
                 )
                 return
+            if parsed.path == "/plan/validate":
+                self._with_session(
+                    lambda session: validate_preview_payload(
+                        session,
+                        config,
+                        preview_id=str(body["preview_id"]),
+                    )
+                )
+                return
             if parsed.path == "/restore":
                 self._with_session(lambda session: restore_payload(session, str(body["target"])))
                 return
@@ -285,6 +334,9 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 return
             if parsed.path == "/soft-review-action":
                 self._with_session(lambda session: create_soft_review_action_payload(session, body))
+                return
+            if parsed.path == "/runtime-jobs/run":
+                self._run_runtime_job(str(body["job_name"]))
                 return
             if parsed.path == "/exemptions":
                 self._with_session(lambda session: create_exemption_payload(session, body))
@@ -347,6 +399,29 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 return
             self._send_text(payload)
 
+        def _run_runtime_job(self, job_name: str) -> None:
+            if scheduler is None:
+                self._send_json(
+                    {"message": "Runtime background jobs are disabled"},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            try:
+                payload = scheduler.run_job_now(job_name)
+            except KeyError as exc:
+                self._send_json(
+                    {"message": "Not Found", "detail": str(exc)},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            except Exception as exc:  # pragma: no cover - defensive HTTP boundary
+                self._send_json(
+                    {"message": "Internal Server Error", "detail": str(exc)},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(payload)
+
         def _read_json_body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0:
@@ -381,4 +456,19 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
         (config.security.operator_host, config.security.operator_port), Handler
     )
+    original_shutdown = server.shutdown
+    original_server_close = server.server_close
+
+    def _shutdown() -> None:
+        if scheduler is not None:
+            scheduler.stop()
+        original_shutdown()
+
+    def _server_close() -> None:
+        if scheduler is not None:
+            scheduler.stop()
+        original_server_close()
+
+    server.shutdown = _shutdown  # type: ignore[assignment]
+    server.server_close = _server_close  # type: ignore[assignment]
     return server

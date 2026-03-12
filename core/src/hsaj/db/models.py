@@ -364,3 +364,22 @@ class BridgeSyncStatus(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class RuntimeJobStatus(Base):
+    """Latest known state for background runtime jobs."""
+
+    __tablename__ = "runtime_job_status"
+
+    job_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="never_run")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

@@ -16,12 +16,15 @@ from .db.models import (
     File,
     PlayHistory,
     ReviewDecision,
+    RuntimeJobStatus,
 )
 from .executor import apply_plan, cleanup_retention, restore_from_quarantine
 from .exemptions import add_exemption, deactivate_exemption, list_exemptions
 from .plan_runs import create_plan_run, load_plan_run, mark_plan_applied
+from .plan_validation import validate_plan
 from .planner import Plan, build_plan, build_soft_review_plan
 from .reviews import add_review_decision, latest_soft_candidate_actions, list_review_decisions
+from .runtime_jobs import JOB_BLOCKED_SYNC, JOB_CLEANUP, list_runtime_job_statuses
 
 
 def health_payload(
@@ -36,6 +39,9 @@ def health_payload(
         "schema_version": schema_version,
         "bridge_contract_version": config.bridge.contract_version,
         "auth_required": bool(config.security.operator_token),
+        "runtime": {
+            "background_jobs_enabled": config.runtime.enable_background_jobs,
+        },
         "blocked_sync": (
             {
                 "status": blocked_sync.status,
@@ -104,12 +110,14 @@ def stats_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
     )
     reviews_count = session.scalar(select(func.count()).select_from(ReviewDecision))
     blocked_sync = session.get(BridgeSyncStatus, "blocked")
+    runtime_jobs = session.scalar(select(func.count()).select_from(RuntimeJobStatus))
     files_count = session.scalar(select(func.count()).select_from(File))
     play_history_count = session.scalar(select(func.count()).select_from(PlayHistory))
     return {
         "files": files_count or 0,
         "play_history": play_history_count or 0,
         "reviews": reviews_count or 0,
+        "runtime_jobs": runtime_jobs or 0,
         "blocked_sync": {
             "status": blocked_sync.status if blocked_sync is not None else "never_run",
             "item_count": blocked_sync.item_count if blocked_sync is not None else 0,
@@ -132,6 +140,7 @@ def metrics_payload(session: Session, config: HsajConfig) -> str:
         f'{metric_prefix}_files_total {stats["files"]}',
         f'{metric_prefix}_play_history_total {stats["play_history"]}',
         f'{metric_prefix}_review_decisions_total {stats["reviews"]}',
+        f'{metric_prefix}_runtime_jobs_total {stats["runtime_jobs"]}',
         f'{metric_prefix}_blocked_sync_item_count {stats["blocked_sync"]["item_count"]}',
         f'{metric_prefix}_candidates_planned {candidates["planned"]}',
         f'{metric_prefix}_candidates_quarantined {candidates["quarantined"]}',
@@ -148,11 +157,33 @@ def plan_preview_payload(session: Session, config: HsajConfig) -> dict[str, Any]
     plan = build_plan(session=session, config=config)
     request_id = uuid4().hex
     plan_run = create_plan_run(session=session, plan=plan, request_id=request_id)
+    validation = validate_plan(session, config, plan)
     session.commit()
     return {
         "preview_id": plan_run.id,
         "request_id": request_id,
         "plan": plan.to_dict(),
+        "validation": validation.to_dict(),
+    }
+
+
+def validate_preview_payload(
+    session: Session,
+    config: HsajConfig,
+    *,
+    preview_id: str,
+) -> dict[str, Any]:
+    plan_run, stored_plan = load_plan_run(session, preview_id)
+    if plan_run is None or stored_plan is None:
+        raise KeyError(preview_id)
+    validation = validate_plan(session, config, stored_plan)
+    if validation.issues and plan_run.status in {"preview", "review_preview"}:
+        plan_run.status = "stale"
+        session.commit()
+    return {
+        "preview_id": preview_id,
+        "plan_status": plan_run.status,
+        "validation": validation.to_dict(),
     }
 
 
@@ -176,10 +207,13 @@ def apply_preview_payload(
         plan_run = create_plan_run(session=session, plan=plan, request_id=request_id)
         plan_id = plan_run.id
 
+    validation = validate_plan(session, config, plan)
+    validated_plan = validation.filtered_plan
+
     result = apply_plan(
         session=session,
         config=config,
-        plan=plan,
+        plan=validated_plan,
         dry_run=dry_run,
         request_id=request_id,
         plan_id=plan_id,
@@ -200,16 +234,21 @@ def apply_preview_payload(
                         action="quarantined",
                         notes="Applied from operator review preview",
                     )
-            mark_plan_applied(session, plan_run)
+            mark_plan_applied(
+                session,
+                plan_run,
+                status="applied_partial" if validation.issues else "applied",
+            )
             session.commit()
 
     return {
         "request_id": request_id,
         "preview_id": plan_id,
         "dry_run": dry_run,
+        "validation": validation.to_dict(),
         "applied_atmos": [asdict(item) for item in result.applied_atmos],
         "quarantined": [asdict(item) for item in result.quarantined],
-        "skipped": result.skipped,
+        "skipped": result.skipped + [issue.code for issue in validation.issues],
     }
 
 
@@ -310,6 +349,45 @@ def reviews_payload(session: Session) -> list[dict[str, Any]]:
         }
         for decision in list_review_decisions(session)
     ]
+
+
+def runtime_jobs_payload(session: Session, config: HsajConfig) -> list[dict[str, Any]]:
+    configured_jobs = {
+        JOB_BLOCKED_SYNC: {
+            "interval_minutes": config.runtime.blocked_sync_interval_minutes,
+            "run_on_start": config.runtime.blocked_sync_on_start,
+        },
+        JOB_CLEANUP: {
+            "interval_minutes": config.runtime.cleanup_interval_minutes,
+            "run_on_start": config.runtime.cleanup_on_start,
+        },
+    }
+    stored = {item.job_name: item for item in list_runtime_job_statuses(session)}
+    payload: list[dict[str, Any]] = []
+    for job_name, job_config in configured_jobs.items():
+        record = stored.get(job_name)
+        payload.append(
+            {
+                "job_name": job_name,
+                "background_enabled": config.runtime.enable_background_jobs,
+                "interval_minutes": job_config["interval_minutes"],
+                "run_on_start": job_config["run_on_start"],
+                "status": record.status if record is not None else "never_run",
+                "last_attempt_at": (
+                    record.last_attempt_at.isoformat()
+                    if record and record.last_attempt_at
+                    else None
+                ),
+                "last_success_at": (
+                    record.last_success_at.isoformat()
+                    if record and record.last_success_at
+                    else None
+                ),
+                "last_error": record.last_error if record is not None else None,
+                "last_result_json": record.last_result_json if record is not None else None,
+            }
+        )
+    return payload
 
 
 def create_soft_review_preview_payload(

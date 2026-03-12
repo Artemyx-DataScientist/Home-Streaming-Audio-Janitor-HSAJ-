@@ -44,3 +44,10 @@ observability:
   log_level: INFO
   structured_logging: true
   service_name: hsaj-core
+
+runtime:
+  enable_background_jobs: false
+  blocked_sync_interval_minutes: 15
+  cleanup_interval_minutes: 60
+  blocked_sync_on_start: true
+  cleanup_on_start: true

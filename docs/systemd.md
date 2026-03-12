@@ -35,9 +35,19 @@ Important environment variables:
 - `HSAJ_BRIDGE_WS`
 - `HSAJ_BRIDGE_TOKEN`
 - `HSAJ_OPERATOR_TOKEN`
+- `BRIDGE_BLOCKED_SOURCE`
+- `BRIDGE_BLOCKED_CACHE_SECONDS`
+- `BRIDGE_BLOCKED_BROWSE_SPECS`
+- `BRIDGE_BLOCKED_FILE`
+- `BRIDGE_BLOCKED_JSON`
 
 Keep `BRIDGE_HOST=127.0.0.1` unless you have a clear reason to expose it differently. If you bind the bridge to a non-loopback host, set `BRIDGE_SHARED_SECRET`.
 If you expose the core operator API beyond localhost, set `HSAJ_OPERATOR_TOKEN` and pass it as `X-HSAJ-Operator-Token`.
+
+For a live blocked-source from Roon, set `BRIDGE_BLOCKED_SOURCE=roon_browse` and provide
+`BRIDGE_BLOCKED_BROWSE_SPECS` as a JSON array describing which browse paths should be interpreted
+as blocked artists/albums/tracks. Keep `BRIDGE_BLOCKED_FILE` / `BRIDGE_BLOCKED_JSON` only as
+fallback modes for demos or controlled imports.
 
 Operational probes:
 - bridge: `/live`, `/ready`, `/health`, `/metrics`

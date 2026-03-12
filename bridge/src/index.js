@@ -6,6 +6,7 @@ import { createBlockedProvider } from "./blocked.js";
 
 const require = createRequire(import.meta.url);
 const RoonApi = require("node-roon-api");
+const RoonApiBrowse = require("node-roon-api-browse");
 const RoonApiStatus = require("node-roon-api-status");
 const RoonApiTransport = require("node-roon-api-transport");
 
@@ -86,7 +87,7 @@ const buildObservedTrackId = ({ zoneId, title, artist, album, durationMs, trackn
 
 const buildBlockedSummary = (blockedProvider) => {
   try {
-    const snapshot = blockedProvider();
+    const snapshot = blockedProvider.describe ? blockedProvider.describe() : null;
     if (snapshot === null) {
       return {
         configured: false,
@@ -96,13 +97,7 @@ const buildBlockedSummary = (blockedProvider) => {
         generated_at: null,
       };
     }
-    return {
-      ...(snapshot.source ?? { configured: true, mode: "unknown" }),
-      contract_version: snapshot.contract_version ?? null,
-      item_count: snapshot.item_count ?? snapshot.items?.length ?? 0,
-      generated_at: snapshot.generated_at ?? null,
-      object_types: snapshot.object_types ?? [],
-    };
+    return snapshot;
   } catch (error) {
     return {
       ...(blockedProvider.describe ? blockedProvider.describe() : { configured: true, mode: "unknown" }),
@@ -323,8 +318,16 @@ const createObservedState = () => {
   };
 };
 
-const startApiServer = (port, host, healthProvider, readyProvider, metricsProvider, trackProvider, blockedProvider) => {
-  const server = http.createServer((req, res) => {
+const startApiServer = (
+  port,
+  host,
+  healthProvider,
+  readyProvider,
+  metricsProvider,
+  trackProvider,
+  blockedProvider,
+) => {
+  const server = http.createServer(async (req, res) => {
     const url = getRequestUrl(req);
 
     if (req.method === "GET" && url.pathname === "/live") {
@@ -357,9 +360,9 @@ const startApiServer = (port, host, healthProvider, readyProvider, metricsProvid
     if (req.method === "GET" && url.pathname === "/blocked") {
       let blocked;
       try {
-        blocked = blockedProvider();
+        blocked = await blockedProvider.getSnapshot();
       } catch (error) {
-        sendJson(res, 500, { message: error.message });
+        sendJson(res, 503, { message: error.message });
         return;
       }
       if (blocked === null) {
@@ -456,7 +459,7 @@ const handleZoneSubscription = (data, observedState) => {
   }
 };
 
-const createRoonClient = (roonConnection, observedState) => {
+const createRoonClient = (roonConnection, observedState, { onBrowseService } = {}) => {
   /** @type {ReturnType<typeof RoonApiStatus>} */
   let statusService;
 
@@ -471,6 +474,7 @@ const createRoonClient = (roonConnection, observedState) => {
       roonConnection.status = "connected";
       statusService.set_status("OK", `Connected to ${core.display_name}`);
       console.log(`Connected to Roon Core: ${core.display_name} (${core.core_id})`);
+      onBrowseService?.(core.services.RoonApiBrowse ?? null, core);
       core.services.RoonApiTransport.subscribe_zones((cmd, data) => {
         console.log(`[transport] ${cmd}`);
         handleZoneSubscription(data, observedState);
@@ -479,6 +483,7 @@ const createRoonClient = (roonConnection, observedState) => {
     core_unpaired: (core) => {
       roonConnection.status = "disconnected";
       statusService.set_status("Disconnected", "Waiting for Roon Core");
+      onBrowseService?.(null, core);
       observedState.reset();
       console.warn(`Lost connection to Roon Core: ${core?.display_name ?? "unknown core"}`);
     },
@@ -486,7 +491,7 @@ const createRoonClient = (roonConnection, observedState) => {
 
   statusService = new RoonApiStatus(roon);
   roon.init_services({
-    required_services: [RoonApiTransport],
+    required_services: [RoonApiBrowse, RoonApiTransport],
     provided_services: [statusService],
   });
   statusService.set_status("Initializing", "Searching for Roon Core");
@@ -507,10 +512,13 @@ const startBridge = () => {
     trackCacheEntries: 0,
   };
   const observedState = createObservedState();
+  let currentBrowseService = null;
   observedState.setOnTrackRemembered(() => {
     metrics.trackCacheEntries = observedState.trackCount();
   });
-  const blockedProvider = createBlockedProvider(process.env);
+  const blockedProvider = createBlockedProvider(process.env, {
+    getBrowseService: () => currentBrowseService,
+  });
   const server = startApiServer(
     DEFAULT_PORT,
     DEFAULT_HOST,
@@ -522,7 +530,17 @@ const startBridge = () => {
   );
   const channel = startWebSocketChannel(server, DEFAULT_WS_PATH, BRIDGE_SOURCE, metrics);
   observedState.setBroadcaster(channel.broadcastTransportEvent);
-  createRoonClient(roonConnection, observedState);
+  createRoonClient(roonConnection, observedState, {
+    onBrowseService: (browseService) => {
+      currentBrowseService = browseService;
+      if (!browseService) {
+        return;
+      }
+      blockedProvider.refresh({ force: true }).catch((error) => {
+        console.warn(`[blocked] live refresh failed after pair: ${error.message}`);
+      });
+    },
+  });
 
   console.log(`HSAJ bridge started. WS endpoint ws://${DEFAULT_HOST}:${DEFAULT_PORT}${DEFAULT_WS_PATH}`);
 };

@@ -78,3 +78,28 @@ database:
     loaded = load_config(config_path)
 
     assert loaded.config.security.operator_token == "top-secret"
+
+
+def test_load_config_runtime_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "hsaj.yaml"
+    config_path.write_text(
+        """
+database:
+  driver: sqlite
+  path: ./data/test.db
+runtime:
+  enable_background_jobs: true
+  blocked_sync_interval_minutes: 5
+  cleanup_interval_minutes: 30
+  blocked_sync_on_start: false
+  cleanup_on_start: true
+"""
+    )
+
+    loaded = load_config(config_path)
+
+    assert loaded.config.runtime.enable_background_jobs is True
+    assert loaded.config.runtime.blocked_sync_interval_minutes == 5
+    assert loaded.config.runtime.cleanup_interval_minutes == 30
+    assert loaded.config.runtime.blocked_sync_on_start is False
+    assert loaded.config.runtime.cleanup_on_start is True
