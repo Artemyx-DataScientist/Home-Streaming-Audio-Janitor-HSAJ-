@@ -31,9 +31,14 @@ Run the core listener:
 ```bash
 cd core
 source .venv/bin/activate
-python -m core.app
-# or
 hsaj listen --config configs/hsaj.yaml
+```
+
+Run the operator API and background runtime jobs:
+```bash
+cd core
+source .venv/bin/activate
+hsaj serve --config ../configs/hsaj.yaml
 ```
 
 ## Bridge behavior
@@ -54,8 +59,11 @@ Operational bridge probes:
 - `GET /ready`
 - `GET /metrics`
 
+`GET /ready` is dependency-aware for the blocked source. In live browse mode it returns a non-ready status until the Roon browse service is connected and the blocked provider is healthy.
+
 Observed transport events are sourced from Roon transport subscriptions. Demo tracks and demo blocks are no longer used.
 `/blocked` returns a versioned snapshot envelope with `contract_version`, `generated_at`, `source`, `item_count`, `object_types`, and `items`.
+The current blocked snapshot contract is `v2`, and the core now validates the expected contract during blocked sync.
 Blocked `items` accept `artist`, `album`, and `track` objects and preserve metadata like `artist`, `album`, `title`, `track_number`, and `duration_ms` for the core inheritance flow.
 
 ## Security defaults
@@ -141,6 +149,7 @@ If `security.operator_token` or `HSAJ_OPERATOR_TOKEN` is set, operator routes re
 `X-HSAJ-Operator-Token`. Health, live, ready, and metrics remain available for probes.
 
 Core health and metrics also expose the last persisted blocked-sync status, including whether the most recent bridge fetch succeeded, which blocked contract version was seen, and how many blocked objects were in the last snapshot.
+`GET /ready` is dependency-aware and returns a non-ready status if required library roots are missing, `ffprobe` cannot be resolved, quarantine is not configured, or blocked sync is stale/failing while background jobs are enabled.
 
 Background runtime jobs can be enabled inside `hsaj serve`:
 
@@ -183,7 +192,7 @@ GitHub Actions runs:
 
 ## Systemd
 
-Systemd service files live under `configs/systemd/`. See [docs/systemd.md](docs/systemd.md).
+Systemd service files live under `configs/systemd/`. The canonical production path is `hsaj-core.service` running `hsaj serve`, with `hsaj-core.timer` optionally driving `hsaj-maintenance.service`. See [docs/systemd.md](docs/systemd.md).
 
 ## License
 

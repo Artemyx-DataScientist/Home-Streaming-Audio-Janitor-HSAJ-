@@ -262,7 +262,14 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 )
                 return
             if parsed.path == "/ready":
-                self._with_session(lambda session: readiness_payload(session, config))
+                self._with_session(
+                    lambda session: readiness_payload(session, config),
+                    status_builder=lambda payload: (
+                        HTTPStatus.OK
+                        if payload.get("status") == "ready"
+                        else HTTPStatus.SERVICE_UNAVAILABLE
+                    ),
+                )
                 return
             if parsed.path == "/metrics":
                 self._with_session_text(lambda session: metrics_payload(session, config))
@@ -369,7 +376,12 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
             )
             return False
 
-        def _with_session(self, builder: Callable[[Session], Any]) -> None:
+        def _with_session(
+            self,
+            builder: Callable[[Session], Any],
+            *,
+            status_builder: Callable[[Any], HTTPStatus] | None = None,
+        ) -> None:
             try:
                 with Session(engine) as session:
                     payload = builder(session)
@@ -385,7 +397,8 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
                 return
-            self._send_json(payload)
+            status = status_builder(payload) if status_builder is not None else HTTPStatus.OK
+            self._send_json(payload, status=status)
 
         def _with_session_text(self, builder: Callable[[Session], str]) -> None:
             try:

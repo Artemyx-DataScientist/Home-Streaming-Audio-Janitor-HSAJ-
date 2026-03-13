@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .blocking import (
     BridgeClientError,
+    ensure_blocked_contract_version,
     fetch_blocked_snapshot_from_bridge,
     record_blocked_sync_failure,
     record_blocked_sync_success,
@@ -35,6 +36,10 @@ def run_blocked_sync_job(session: Session, config: HsajConfig) -> dict[str, Any]
     attempted_at = utc_now()
     try:
         snapshot = fetch_blocked_snapshot_from_bridge(base_url=config.bridge.http_url)
+        ensure_blocked_contract_version(
+            snapshot,
+            expected_contract=config.bridge.contract_version,
+        )
         record_blocked_sync_success(session, snapshot=snapshot, attempted_at=attempted_at)
         result = sync_blocked_objects(
             session=session,

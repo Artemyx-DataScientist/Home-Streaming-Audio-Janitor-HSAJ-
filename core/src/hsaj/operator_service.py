@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -25,6 +26,95 @@ from .plan_validation import validate_plan
 from .planner import Plan, build_plan, build_soft_review_plan
 from .reviews import add_review_decision, latest_soft_candidate_actions, list_review_decisions
 from .runtime_jobs import JOB_BLOCKED_SYNC, JOB_CLEANUP, list_runtime_job_statuses
+from .timeutils import utc_now
+
+
+def _readiness_check(name: str, ok: bool, detail: str) -> dict[str, object]:
+    return {"name": name, "ok": ok, "detail": detail}
+
+
+def _blocked_sync_check(session: Session, config: HsajConfig) -> dict[str, object]:
+    blocked_sync = session.get(BridgeSyncStatus, "blocked")
+    if blocked_sync is None:
+        if config.runtime.enable_background_jobs:
+            return _readiness_check(
+                "blocked_sync",
+                False,
+                "Background jobs are enabled, but blocked sync has never run",
+            )
+        return _readiness_check("blocked_sync", True, "Manual blocked sync mode")
+
+    if blocked_sync.status != "ok":
+        return _readiness_check(
+            "blocked_sync",
+            False,
+            f"Last blocked sync status is {blocked_sync.status}",
+        )
+
+    expected_contract = (config.bridge.contract_version or "").strip() or None
+    actual_contract = (blocked_sync.contract_version or "").strip() or None
+    if expected_contract is not None and actual_contract != expected_contract:
+        return _readiness_check(
+            "blocked_contract",
+            False,
+            f"Expected blocked contract {expected_contract}, got {actual_contract or 'legacy'}",
+        )
+
+    if config.runtime.enable_background_jobs:
+        if blocked_sync.last_success_at is None:
+            return _readiness_check(
+                "blocked_sync_fresh",
+                False,
+                "Blocked sync has no success timestamp",
+            )
+        max_age = timedelta(minutes=max(config.runtime.blocked_sync_interval_minutes * 2, 5))
+        age = utc_now() - blocked_sync.last_success_at
+        if age > max_age:
+            return _readiness_check(
+                "blocked_sync_fresh",
+                False,
+                f"Blocked sync is stale by {int(age.total_seconds())}s",
+            )
+
+    return _readiness_check("blocked_sync", True, "Blocked sync is healthy")
+
+
+def readiness_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
+    stats = stats_payload(session, config)
+    ffprobe_path = config.ffprobe_resolved_path()
+    checks = [
+        _readiness_check(
+            "library_roots",
+            bool(config.paths.library_roots)
+            and all(root.exists() and root.is_dir() for root in config.paths.library_roots),
+            "All configured library roots exist"
+            if config.paths.library_roots
+            and all(root.exists() and root.is_dir() for root in config.paths.library_roots)
+            else "One or more library roots are missing",
+        ),
+        _readiness_check(
+            "quarantine_dir",
+            config.paths.quarantine_dir is not None,
+            "Quarantine directory is configured"
+            if config.paths.quarantine_dir is not None
+            else "paths.quarantine_dir is not configured",
+        ),
+        _readiness_check(
+            "ffprobe",
+            ffprobe_path is not None and ffprobe_path.exists(),
+            f"ffprobe resolved to {ffprobe_path}"
+            if ffprobe_path is not None and ffprobe_path.exists()
+            else f"Could not resolve ffprobe from {config.paths.ffprobe_path}",
+        ),
+        _blocked_sync_check(session, config),
+    ]
+    ready = all(bool(check["ok"]) for check in checks)
+    return {
+        "status": "ready" if ready else "not_ready",
+        "bridge_contract_version": config.bridge.contract_version,
+        "counts": stats,
+        "checks": checks,
+    }
 
 
 def health_payload(
@@ -72,15 +162,6 @@ def health_payload(
             "host": config.security.operator_host,
             "port": config.security.operator_port,
         },
-    }
-
-
-def readiness_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
-    stats = stats_payload(session, config)
-    return {
-        "status": "ready",
-        "bridge_contract_version": config.bridge.contract_version,
-        "counts": stats,
     }
 
 

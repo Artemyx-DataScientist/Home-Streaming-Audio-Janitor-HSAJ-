@@ -38,12 +38,22 @@ def _config(
     token: str | None = None,
     runtime_enabled: bool = False,
 ) -> HsajConfig:
+    library_root = tmp_path / "library"
+    quarantine_dir = tmp_path / "quarantine"
+    atmos_dir = tmp_path / "atmos"
+    ffprobe_path = tmp_path / "bin" / "ffprobe"
+    library_root.mkdir(parents=True, exist_ok=True)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    atmos_dir.mkdir(parents=True, exist_ok=True)
+    ffprobe_path.parent.mkdir(parents=True, exist_ok=True)
+    ffprobe_path.write_text("stub")
     return HsajConfig(
         database=DatabaseConfig(driver="sqlite", path=tmp_path / "hsaj.db"),
         paths=PathsConfig(
-            library_roots=[tmp_path / "library"],
-            quarantine_dir=tmp_path / "quarantine",
-            atmos_dir=tmp_path / "atmos",
+            library_roots=[library_root],
+            quarantine_dir=quarantine_dir,
+            atmos_dir=atmos_dir,
+            ffprobe_path=str(ffprobe_path),
         ),
         bridge=BridgeConfig(),
         security=SecurityConfig(
@@ -96,10 +106,35 @@ def test_server_exposes_live_ready_and_metrics(tmp_path: Path) -> None:
         status, ready_payload = _json_request("GET", f"{base_url}/ready")
         assert status == 200
         assert ready_payload["status"] == "ready"
+        assert all(check["ok"] is True for check in ready_payload["checks"])
 
         status, metrics_payload = _text_request(f"{base_url}/metrics")
         assert status == 200
         assert "hsaj_core_files_total" in metrics_payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_ready_returns_503_when_dependencies_are_missing(tmp_path: Path) -> None:
+    config = _config(tmp_path, runtime_enabled=True)
+    config.paths.library_roots = [tmp_path / "missing-library"]
+    config.paths.ffprobe_path = str(tmp_path / "missing-bin" / "ffprobe")
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        try:
+            _json_request("GET", f"{base_url}/ready")
+            raise AssertionError("Expected readiness failure")
+        except HTTPError as exc:
+            assert exc.code == 503
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["status"] == "not_ready"
+            assert any(check["ok"] is False for check in payload["checks"])
     finally:
         server.shutdown()
         server.server_close()

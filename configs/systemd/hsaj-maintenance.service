@@ -1,0 +1,12 @@
+[Unit]
+Description=HSAJ maintenance scan and cleanup
+After=network-online.target hsaj-bridge.service hsaj-core.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/hsaj/hsaj.env
+Environment=HSAJ_ROOT=/opt/hsaj
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj scan'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj roon sync'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj cleanup'

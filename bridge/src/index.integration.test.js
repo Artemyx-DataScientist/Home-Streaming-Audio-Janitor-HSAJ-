@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { WebSocket } from "ws";
 
 
-const waitForHttp = async (url, attempts = 40) => {
+const waitForHttp = async (url, attempts = 40, init = undefined) => {
   for (let index = 0; index < attempts; index += 1) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, init);
       if (response.ok) {
         return response;
       }
@@ -17,6 +18,48 @@ const waitForHttp = async (url, attempts = 40) => {
   }
   throw new Error(`Timed out waiting for ${url}`);
 };
+
+
+const waitForWsUnauthorized = async (url) =>
+  new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`Timed out waiting for unauthorized websocket response from ${url}`));
+    }, 3000);
+    socket.once("unexpected-response", (_request, response) => {
+      clearTimeout(timeout);
+      socket.terminate();
+      resolve(response.statusCode);
+    });
+    socket.once("open", () => {
+      clearTimeout(timeout);
+      socket.close();
+      reject(new Error("Expected websocket authorization failure"));
+    });
+    socket.once("error", () => {
+      // ws emits an error after unexpected-response; the HTTP status is asserted there.
+    });
+  });
+
+
+const waitForWsOpen = async (url) =>
+  new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`Timed out opening websocket ${url}`));
+    }, 3000);
+    socket.once("open", () => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve();
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 
 
 test("bridge exposes live, ready, health, and metrics endpoints", async () => {
@@ -61,6 +104,71 @@ test("bridge exposes live, ready, health, and metrics endpoints", async () => {
     const blockedPayload = await blockedResponse.json();
     assert.equal(blockedPayload.contract_version, "v2");
     assert.ok(Array.isArray(blockedPayload.items));
+  } finally {
+    child.kill("SIGTERM");
+  }
+});
+
+
+test("bridge enforces shared secret on blocked HTTP and websocket routes", async () => {
+  const port = String(19580 + Math.floor(Math.random() * 500));
+  const secret = "bridge-secret";
+  const child = spawn("node", ["src/index.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      BRIDGE_HOST: "127.0.0.1",
+      BRIDGE_PORT: port,
+      BRIDGE_BLOCKED_JSON: "[]",
+      BRIDGE_SHARED_SECRET: secret,
+    },
+    stdio: "ignore",
+  });
+
+  try {
+    await waitForHttp(`http://127.0.0.1:${port}/live`);
+
+    const blockedUnauthorized = await fetch(`http://127.0.0.1:${port}/blocked`);
+    assert.equal(blockedUnauthorized.status, 401);
+
+    const blockedAuthorized = await fetch(`http://127.0.0.1:${port}/blocked`, {
+      headers: { "X-HSAJ-Token": secret },
+    });
+    assert.equal(blockedAuthorized.status, 200);
+
+    const unauthorizedStatus = await waitForWsUnauthorized(`ws://127.0.0.1:${port}/events`);
+    assert.equal(unauthorizedStatus, 401);
+
+    await waitForWsOpen(`ws://127.0.0.1:${port}/events?token=${secret}`);
+  } finally {
+    child.kill("SIGTERM");
+  }
+});
+
+
+test("bridge ready probe degrades when live blocked browse source is unavailable", async () => {
+  const port = String(19880 + Math.floor(Math.random() * 500));
+  const child = spawn("node", ["src/index.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      BRIDGE_HOST: "127.0.0.1",
+      BRIDGE_PORT: port,
+      BRIDGE_BLOCKED_SOURCE: "roon_browse",
+      BRIDGE_BLOCKED_BROWSE_SPECS: JSON.stringify([
+        { path: ["Hidden Artists"], object_type: "artist" },
+      ]),
+    },
+    stdio: "ignore",
+  });
+
+  try {
+    await waitForHttp(`http://127.0.0.1:${port}/live`);
+    const readyResponse = await fetch(`http://127.0.0.1:${port}/ready`);
+    assert.equal(readyResponse.status, 503);
+    const readyPayload = await readyResponse.json();
+    assert.equal(readyPayload.status, "not_ready");
+    assert.equal(readyPayload.blocked_source.mode, "roon_browse_live");
   } finally {
     child.kill("SIGTERM");
   }
