@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .blocking import (
     BridgeClientError,
     ensure_blocked_contract_version,
+    ensure_blocked_source_mode,
     fetch_blocked_snapshot_from_bridge,
     record_blocked_sync_failure,
     record_blocked_sync_success,
@@ -39,6 +40,10 @@ def run_blocked_sync_job(session: Session, config: HsajConfig) -> dict[str, Any]
         ensure_blocked_contract_version(
             snapshot,
             expected_contract=config.bridge.contract_version,
+        )
+        ensure_blocked_source_mode(
+            snapshot,
+            expected_source_mode=config.bridge.required_source_mode,
         )
         record_blocked_sync_success(session, snapshot=snapshot, attempted_at=attempted_at)
         result = sync_blocked_objects(
@@ -82,22 +87,35 @@ def run_blocked_sync_job(session: Session, config: HsajConfig) -> dict[str, Any]
 
 def run_cleanup_job(session: Session, config: HsajConfig) -> dict[str, Any]:
     attempted_at = utc_now()
-    result = cleanup_retention(session=session, config=config, request_id=f"runtime:{JOB_CLEANUP}")
-    payload = {
-        "job_name": JOB_CLEANUP,
-        "status": "ok",
-        "deleted_candidates": result.deleted_candidates,
-        "expired_candidates": result.expired_candidates,
-    }
-    _record_runtime_job_result(
-        session,
-        job_name=JOB_CLEANUP,
-        status="ok",
-        attempted_at=attempted_at,
-        result=payload,
-    )
-    session.commit()
-    return payload
+    try:
+        result = cleanup_retention(
+            session=session, config=config, request_id=f"runtime:{JOB_CLEANUP}"
+        )
+        payload = {
+            "job_name": JOB_CLEANUP,
+            "status": "ok",
+            "deleted_candidates": result.deleted_candidates,
+            "expired_candidates": result.expired_candidates,
+        }
+        _record_runtime_job_result(
+            session,
+            job_name=JOB_CLEANUP,
+            status="ok",
+            attempted_at=attempted_at,
+            result=payload,
+        )
+        session.commit()
+        return payload
+    except Exception as exc:
+        _record_runtime_job_result(
+            session,
+            job_name=JOB_CLEANUP,
+            status="error",
+            attempted_at=attempted_at,
+            error=str(exc),
+        )
+        session.commit()
+        raise
 
 
 def _record_runtime_job_result(

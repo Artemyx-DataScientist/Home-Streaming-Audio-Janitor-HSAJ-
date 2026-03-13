@@ -111,3 +111,38 @@ def test_run_blocked_sync_job_rejects_contract_mismatch(tmp_path: Path, monkeypa
         assert job_status is not None
         assert job_status.status == "error"
         assert "Blocked contract mismatch" in (job_status.last_error or "")
+
+
+def test_run_blocked_sync_job_rejects_source_mode_mismatch(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    config.bridge.required_source_mode = "roon_browse_live"
+    engine, _ = init_database(config.database)
+
+    monkeypatch.setattr(
+        "hsaj.runtime_jobs.fetch_blocked_snapshot_from_bridge",
+        lambda base_url=None: type(
+            "Snapshot",
+            (),
+            {
+                "items": [
+                    BlockedObject(object_type="artist", object_id="artist-1", artist="Artist")
+                ],
+                "contract_version": "v2",
+                "generated_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "source_mode": "inline_json",
+                "item_count": 1,
+            },
+        )(),
+    )
+
+    with Session(engine) as session:
+        try:
+            run_blocked_sync_job(session, config)
+            raise AssertionError("Expected blocked source mode mismatch")
+        except BridgeClientError as exc:
+            assert "Blocked source mode mismatch" in str(exc)
+
+        job_status = session.get(RuntimeJobStatus, JOB_BLOCKED_SYNC)
+        assert job_status is not None
+        assert job_status.status == "error"
+        assert "Blocked source mode mismatch" in (job_status.last_error or "")

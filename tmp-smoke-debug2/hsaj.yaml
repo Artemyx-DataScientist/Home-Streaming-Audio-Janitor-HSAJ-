@@ -1,0 +1,17 @@
+database:
+  driver: sqlite
+  path: "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\hsaj.db"
+paths:
+  library_roots:
+    - "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\library"
+  quarantine_dir: "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\quarantine"
+  atmos_dir: "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\atmos"
+  inbox_dir: "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\inbox"
+  ffprobe_path: "D:\\Users\\Artemyx\\PycharmProjects\\Home-Streaming-Audio-Janitor-HSAJ-\\tmp-smoke-debug2\\ffprobe"
+bridge:
+  http_url: http://127.0.0.1:9999
+  ws_url: ws://127.0.0.1:9999/events
+  contract_version: v2
+  required_source_mode: inline_json
+runtime:
+  enable_background_jobs: false

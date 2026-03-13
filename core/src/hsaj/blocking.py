@@ -106,6 +106,21 @@ def ensure_blocked_contract_version(
         )
 
 
+def ensure_blocked_source_mode(
+    snapshot: BlockedSnapshot,
+    *,
+    expected_source_mode: str | None,
+) -> None:
+    expected = (expected_source_mode or "").strip() or None
+    if expected is None:
+        return
+    actual = (snapshot.source_mode or "").strip() or None
+    if actual != expected:
+        raise BridgeClientError(
+            f"Blocked source mode mismatch: expected {expected}, got {actual or 'unknown'}"
+        )
+
+
 def _reason_for(blocked: BlockedObject) -> str:
     return f"blocked_by_{blocked.object_type}"
 

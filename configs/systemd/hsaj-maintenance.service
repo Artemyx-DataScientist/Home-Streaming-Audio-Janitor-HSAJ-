@@ -1,5 +1,5 @@
 [Unit]
-Description=HSAJ maintenance scan and cleanup
+Description=HSAJ legacy maintenance smoke (scan + roon sync + apply --dry-run)
 After=network-online.target hsaj-bridge.service hsaj-core.service
 Wants=network-online.target
 
@@ -7,6 +7,6 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/hsaj/hsaj.env
 Environment=HSAJ_ROOT=/opt/hsaj
-ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj scan'
-ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj roon sync'
-ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj cleanup'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj scan --config "${HSAJ_CONFIG}"'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj roon sync --config "${HSAJ_CONFIG}" --cache-tracks'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj apply --config "${HSAJ_CONFIG}" --dry-run'

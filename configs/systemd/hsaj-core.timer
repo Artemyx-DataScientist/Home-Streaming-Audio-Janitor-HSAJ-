@@ -1,5 +1,5 @@
 [Unit]
-Description=HSAJ scheduled maintenance (scan + roon sync + cleanup)
+Description=HSAJ legacy scheduled smoke (scan + roon sync + apply --dry-run)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

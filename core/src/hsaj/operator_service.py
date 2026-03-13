@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -21,6 +20,11 @@ from .db.models import (
 )
 from .executor import apply_plan, cleanup_retention, restore_from_quarantine
 from .exemptions import add_exemption, deactivate_exemption, list_exemptions
+from .guardrails import (
+    assert_destructive_actions_allowed,
+    destructive_guardrails,
+    readiness_checks,
+)
 from .plan_runs import create_plan_run, load_plan_run, mark_plan_applied
 from .plan_validation import validate_plan
 from .planner import Plan, build_plan, build_soft_review_plan
@@ -29,109 +33,49 @@ from .runtime_jobs import JOB_BLOCKED_SYNC, JOB_CLEANUP, list_runtime_job_status
 from .timeutils import utc_now
 
 
-def _readiness_check(name: str, ok: bool, detail: str) -> dict[str, object]:
-    return {"name": name, "ok": ok, "detail": detail}
-
-
-def _blocked_sync_check(session: Session, config: HsajConfig) -> dict[str, object]:
-    blocked_sync = session.get(BridgeSyncStatus, "blocked")
-    if blocked_sync is None:
-        if config.runtime.enable_background_jobs:
-            return _readiness_check(
-                "blocked_sync",
-                False,
-                "Background jobs are enabled, but blocked sync has never run",
-            )
-        return _readiness_check("blocked_sync", True, "Manual blocked sync mode")
-
-    if blocked_sync.status != "ok":
-        return _readiness_check(
-            "blocked_sync",
-            False,
-            f"Last blocked sync status is {blocked_sync.status}",
-        )
-
-    expected_contract = (config.bridge.contract_version or "").strip() or None
-    actual_contract = (blocked_sync.contract_version or "").strip() or None
-    if expected_contract is not None and actual_contract != expected_contract:
-        return _readiness_check(
-            "blocked_contract",
-            False,
-            f"Expected blocked contract {expected_contract}, got {actual_contract or 'legacy'}",
-        )
-
-    if config.runtime.enable_background_jobs:
-        if blocked_sync.last_success_at is None:
-            return _readiness_check(
-                "blocked_sync_fresh",
-                False,
-                "Blocked sync has no success timestamp",
-            )
-        max_age = timedelta(minutes=max(config.runtime.blocked_sync_interval_minutes * 2, 5))
-        age = utc_now() - blocked_sync.last_success_at
-        if age > max_age:
-            return _readiness_check(
-                "blocked_sync_fresh",
-                False,
-                f"Blocked sync is stale by {int(age.total_seconds())}s",
-            )
-
-    return _readiness_check("blocked_sync", True, "Blocked sync is healthy")
-
-
-def readiness_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
+def readiness_payload(
+    session: Session | None,
+    config: HsajConfig,
+    *,
+    boot_error: str | None = None,
+) -> dict[str, Any]:
     stats = stats_payload(session, config)
-    ffprobe_path = config.ffprobe_resolved_path()
-    checks = [
-        _readiness_check(
-            "library_roots",
-            bool(config.paths.library_roots)
-            and all(root.exists() and root.is_dir() for root in config.paths.library_roots),
-            "All configured library roots exist"
-            if config.paths.library_roots
-            and all(root.exists() and root.is_dir() for root in config.paths.library_roots)
-            else "One or more library roots are missing",
-        ),
-        _readiness_check(
-            "quarantine_dir",
-            config.paths.quarantine_dir is not None,
-            "Quarantine directory is configured"
-            if config.paths.quarantine_dir is not None
-            else "paths.quarantine_dir is not configured",
-        ),
-        _readiness_check(
-            "ffprobe",
-            ffprobe_path is not None and ffprobe_path.exists(),
-            f"ffprobe resolved to {ffprobe_path}"
-            if ffprobe_path is not None and ffprobe_path.exists()
-            else f"Could not resolve ffprobe from {config.paths.ffprobe_path}",
-        ),
-        _blocked_sync_check(session, config),
-    ]
+    checks = [check.to_dict() for check in readiness_checks(session, config, boot_error=boot_error)]
     ready = all(bool(check["ok"]) for check in checks)
     return {
         "status": "ready" if ready else "not_ready",
         "bridge_contract_version": config.bridge.contract_version,
+        "required_blocked_source_mode": config.bridge.required_source_mode,
         "counts": stats,
         "checks": checks,
     }
 
 
 def health_payload(
-    session: Session,
+    session: Session | None,
     config: HsajConfig,
     *,
     schema_version: str | None,
+    boot_error: str | None = None,
 ) -> dict[str, Any]:
-    blocked_sync = session.get(BridgeSyncStatus, "blocked")
+    blocked_sync = session.get(BridgeSyncStatus, "blocked") if session is not None else None
+    guardrails = destructive_guardrails(
+        session,
+        config,
+        boot_error=boot_error,
+        action_name="destructive action",
+    )
+    checks = [check.to_dict() for check in readiness_checks(session, config, boot_error=boot_error)]
+    health_ok = all(bool(check["ok"]) for check in checks)
     return {
-        "status": "ok",
+        "status": "ok" if health_ok else "degraded",
         "schema_version": schema_version,
         "bridge_contract_version": config.bridge.contract_version,
         "auth_required": bool(config.security.operator_token),
         "runtime": {
             "background_jobs_enabled": config.runtime.enable_background_jobs,
         },
+        "readiness_checks": checks,
         "blocked_sync": (
             {
                 "status": blocked_sync.status,
@@ -158,6 +102,7 @@ def health_payload(
             if blocked_sync is not None
             else None
         ),
+        "destructive_guardrails": guardrails,
         "operator": {
             "host": config.security.operator_host,
             "port": config.security.operator_port,
@@ -165,13 +110,34 @@ def health_payload(
     }
 
 
-def liveness_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
-    del session, config
-    return {"status": "live"}
+def liveness_payload(session: Session | None, config: HsajConfig) -> dict[str, Any]:
+    del session
+    return {
+        "status": "live",
+        "blocked_contract_version": config.bridge.contract_version,
+    }
 
 
-def stats_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
+def stats_payload(session: Session | None, config: HsajConfig) -> dict[str, Any]:
     del config
+    if session is None:
+        return {
+            "files": 0,
+            "play_history": 0,
+            "reviews": 0,
+            "runtime_jobs": 0,
+            "blocked_sync": {
+                "status": "boot_error",
+                "item_count": 0,
+            },
+            "candidates": {
+                "planned": 0,
+                "quarantined": 0,
+                "restored": 0,
+                "deleted": 0,
+                "expired": 0,
+            },
+        }
     quarantined = session.scalar(
         select(func.count())
         .select_from(BlockCandidate)
@@ -213,10 +179,18 @@ def stats_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
     }
 
 
-def metrics_payload(session: Session, config: HsajConfig) -> str:
+def metrics_payload(
+    session: Session | None,
+    config: HsajConfig,
+    *,
+    boot_error: str | None = None,
+) -> str:
     stats = stats_payload(session, config)
+    ready_payload = readiness_payload(session, config, boot_error=boot_error)
+    health = health_payload(session, config, schema_version=None, boot_error=boot_error)
     metric_prefix = "hsaj_core"
     candidates = stats["candidates"]
+    readiness_checks_map = {check["name"]: check for check in ready_payload["checks"]}
     lines = [
         f'{metric_prefix}_files_total {stats["files"]}',
         f'{metric_prefix}_play_history_total {stats["play_history"]}',
@@ -230,6 +204,18 @@ def metrics_payload(session: Session, config: HsajConfig) -> str:
         f'{metric_prefix}_candidates_expired {candidates["expired"]}',
         f"{metric_prefix}_operator_auth_required {1 if config.security.operator_token else 0}",
         f"{metric_prefix}_blocked_sync_ok {1 if stats['blocked_sync']['status'] == 'ok' else 0}",
+        f"{metric_prefix}_ready {1 if ready_payload['status'] == 'ready' else 0}",
+        f"{metric_prefix}_health_ok {1 if health['status'] == 'ok' else 0}",
+        f"{metric_prefix}_destructive_actions_allowed "
+        f"{1 if health['destructive_guardrails']['allowed'] else 0}",
+        f"{metric_prefix}_blocked_contract_match "
+        f"{1 if readiness_checks_map.get('blocked_contract', {'ok': True})['ok'] else 0}",
+        f"{metric_prefix}_blocked_source_mode_match "
+        f"{1 if readiness_checks_map.get('blocked_source_mode', {'ok': True})['ok'] else 0}",
+        f"{metric_prefix}_blocked_sync_fresh "
+        f"{1 if readiness_checks_map.get('blocked_sync_fresh', {'ok': True})['ok'] else 0}",
+        f"{metric_prefix}_hard_delete_enabled "
+        f"{1 if config.policy.auto_delete and config.policy.allow_hard_delete else 0}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -290,6 +276,12 @@ def apply_preview_payload(
 
     validation = validate_plan(session, config, plan)
     validated_plan = validation.filtered_plan
+    if not dry_run:
+        assert_destructive_actions_allowed(
+            session,
+            config,
+            action_name="apply",
+        )
 
     result = apply_plan(
         session=session,
@@ -409,6 +401,12 @@ def actions_payload(session: Session, *, limit: int = 100) -> list[dict[str, Any
 
 
 def cleanup_payload(session: Session, config: HsajConfig) -> dict[str, Any]:
+    action_name = "hard_delete" if config.policy.auto_delete else "cleanup"
+    assert_destructive_actions_allowed(
+        session,
+        config,
+        action_name=action_name,
+    )
     result = cleanup_retention(session=session, config=config, request_id=uuid4().hex)
     return {
         "deleted_candidates": result.deleted_candidates,

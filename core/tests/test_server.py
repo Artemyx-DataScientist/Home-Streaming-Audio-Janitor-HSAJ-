@@ -102,6 +102,7 @@ def test_server_exposes_live_ready_and_metrics(tmp_path: Path) -> None:
         status, live_payload = _json_request("GET", f"{base_url}/live")
         assert status == 200
         assert live_payload["status"] == "live"
+        assert live_payload["blocked_contract_version"] == "v2"
 
         status, ready_payload = _json_request("GET", f"{base_url}/ready")
         assert status == 200
@@ -111,6 +112,7 @@ def test_server_exposes_live_ready_and_metrics(tmp_path: Path) -> None:
         status, metrics_payload = _text_request(f"{base_url}/metrics")
         assert status == 200
         assert "hsaj_core_files_total" in metrics_payload
+        assert "hsaj_core_ready 1" in metrics_payload
     finally:
         server.shutdown()
         server.server_close()
@@ -155,6 +157,12 @@ def test_server_enforces_operator_token_for_operator_routes(tmp_path: Path) -> N
         except HTTPError as exc:
             assert exc.code == 401
 
+        try:
+            _json_request("POST", f"{base_url}/cleanup", body={})
+            raise AssertionError("Expected unauthorized mutating request to fail")
+        except HTTPError as exc:
+            assert exc.code == 401
+
         status, payload = _json_request(
             "GET",
             f"{base_url}/plan",
@@ -162,6 +170,38 @@ def test_server_enforces_operator_token_for_operator_routes(tmp_path: Path) -> N
         )
         assert status == 200
         assert "preview_id" in payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_enforces_operator_token_on_all_mutating_routes(tmp_path: Path) -> None:
+    config = _config(tmp_path, token="secret-token", runtime_enabled=True)
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    requests = [
+        ("POST", "/apply", {"preview_id": "missing"}),
+        ("POST", "/plan/validate", {"preview_id": "missing"}),
+        ("POST", "/restore", {"target": "missing"}),
+        ("POST", "/cleanup", {}),
+        ("POST", "/soft-review-preview", {"selections": []}),
+        ("POST", "/soft-review-action", {"file_id": 1, "reason": "x", "action": "dismiss"}),
+        ("POST", "/runtime-jobs/run", {"job_name": "cleanup_retention"}),
+        ("POST", "/exemptions", {"scope_type": "artist", "artist": "Artist"}),
+        ("DELETE", "/exemptions/1", None),
+    ]
+
+    try:
+        for method, path, body in requests:
+            try:
+                _json_request(method, f"{base_url}{path}", body=body)
+                raise AssertionError(f"Expected unauthorized request for {method} {path}")
+            except HTTPError as exc:
+                assert exc.code == 401
     finally:
         server.shutdown()
         server.server_close()
@@ -201,6 +241,85 @@ def test_server_health_exposes_blocked_sync_status(tmp_path: Path) -> None:
         assert status == 200
         assert "hsaj_core_blocked_sync_ok 1" in metrics_payload
         assert "hsaj_core_blocked_sync_item_count 1" in metrics_payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_ready_returns_503_when_blocked_source_mode_mismatches(tmp_path: Path) -> None:
+    config = _config(tmp_path, runtime_enabled=True)
+    config.bridge.required_source_mode = "roon_browse_live"
+
+    engine, _ = init_database(config.database)
+    with Session(engine) as session:
+        record_blocked_sync_success(
+            session,
+            snapshot=BlockedSnapshot(
+                items=[BlockedObject(object_type="artist", object_id="artist-1", artist="Artist")],
+                contract_version="v2",
+                generated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                source_mode="inline_json",
+                item_count=1,
+            ),
+            attempted_at=datetime.now(timezone.utc),
+        )
+        session.commit()
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        try:
+            _json_request("GET", f"{base_url}/ready")
+            raise AssertionError("Expected readiness failure")
+        except HTTPError as exc:
+            assert exc.code == 503
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["status"] == "not_ready"
+            blocked_mode = next(
+                check for check in payload["checks"] if check["name"] == "blocked_source_mode"
+            )
+            assert blocked_mode["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_starts_in_degraded_mode_when_database_init_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        "hsaj.server.init_database",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    server = serve_operator_api(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{config.security.operator_host}:{config.security.operator_port}"
+
+    try:
+        try:
+            _json_request("GET", f"{base_url}/health")
+            raise AssertionError("Expected degraded health")
+        except HTTPError as exc:
+            assert exc.code == 503
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["status"] == "degraded"
+            assert payload["readiness_checks"][0]["name"] == "database"
+
+        try:
+            _json_request("GET", f"{base_url}/ready")
+            raise AssertionError("Expected readiness failure")
+        except HTTPError as exc:
+            assert exc.code == 503
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert payload["status"] == "not_ready"
     finally:
         server.shutdown()
         server.server_close()
@@ -381,7 +500,10 @@ def test_server_can_validate_stale_preview(tmp_path: Path) -> None:
                 object_type="track",
                 object_id="track-1",
                 label="Track",
-                metadata_json='{"artist":"Artist","album":"Album","title":"Title","track_number":1,"duration_ms":300000}',
+                metadata_json=(
+                    '{"artist":"Artist","album":"Album","title":"Title",'
+                    '"track_number":1,"duration_ms":300000}'
+                ),
                 reason="blocked_by_track",
                 status="planned",
                 source="bridge.blocked.v1",

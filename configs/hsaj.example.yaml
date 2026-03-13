@@ -26,6 +26,7 @@ policy:
   block_grace_days: 30
   quarantine_delete_days: 60
   auto_delete: false
+  allow_hard_delete: false
   enable_behavior_scoring: true
   soft_never_played_days: 180
   soft_inbox_days: 30
@@ -34,6 +35,8 @@ bridge:
   http_url: http://127.0.0.1:8080
   ws_url: ws://127.0.0.1:8080/events
   contract_version: v2
+  required_source_mode: roon_browse_live
+  max_blocked_sync_age_minutes: 30
 
 security:
   operator_host: 127.0.0.1
@@ -46,7 +49,7 @@ observability:
   service_name: hsaj-core
 
 runtime:
-  enable_background_jobs: false
+  enable_background_jobs: true
   blocked_sync_interval_minutes: 15
   cleanup_interval_minutes: 60
   blocked_sync_on_start: true

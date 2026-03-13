@@ -548,6 +548,7 @@ def test_cleanup_retention_deletes_files_when_auto_delete_enabled(tmp_path: Path
     config = _base_config(tmp_path)
     config.policy.quarantine_delete_days = 1
     config.policy.auto_delete = True
+    config.policy.allow_hard_delete = True
     engine, _ = init_database(config.database)
 
     with Session(engine) as session:
@@ -592,6 +593,44 @@ def test_cleanup_retention_deletes_files_when_auto_delete_enabled(tmp_path: Path
         assert session.get(File, plan.blocked_quarantine_due[0].file_id) is None
         delete_log = session.query(ActionLog).filter(ActionLog.action == "quarantine_delete").one()
         assert delete_log.target_path == str(quarantine_path)
+        assert '"auto_delete": true' in (delete_log.details or "").lower()
+        assert '"file_missing": false' in (delete_log.details or "").lower()
+
+
+def test_cleanup_retention_requires_explicit_hard_delete_gate(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    config.policy.quarantine_delete_days = 1
+    config.policy.auto_delete = True
+    config.policy.allow_hard_delete = True
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        original_path = config.paths.library_roots[0] / "Artist/Album/track.flac"
+        _create_file(session, path=original_path)
+        _cache_track(
+            session,
+            RoonTrack(
+                roon_track_id="track-1",
+                artist="Artist",
+                album="Album",
+                title="Title",
+                duration_ms=300_000,
+                track_number=1,
+            ),
+        )
+        candidate = _add_candidate(session)
+        plan = _build_plan(session, config)
+        apply_plan(session=session, config=config, plan=plan)
+
+        candidate = session.get(BlockCandidate, candidate.id)
+        assert candidate is not None
+        config.policy.allow_hard_delete = False
+
+        try:
+            cleanup_retention(session=session, config=config, now=candidate.delete_after)
+            raise AssertionError("Expected hard delete guard to block cleanup")
+        except Exception as exc:
+            assert "allow_hard_delete" in str(exc)
 
 
 def test_soft_candidate_dismissal_suppresses_future_plans(tmp_path: Path) -> None:
@@ -627,6 +666,39 @@ def test_soft_candidate_dismissal_suppresses_future_plans(tmp_path: Path) -> Non
         second_plan = _build_plan(session, config)
 
     assert second_plan.soft_candidates == []
+
+
+def test_restore_is_idempotent_after_successful_restore(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        source_file = _create_file(
+            session,
+            path=config.paths.library_roots[0] / "Artist/Album/track.flac",
+        )
+        _cache_track(
+            session,
+            RoonTrack(
+                roon_track_id="track-1",
+                artist="Artist",
+                album="Album",
+                title="Title",
+                duration_ms=300_000,
+                track_number=1,
+            ),
+        )
+        _add_candidate(session)
+        plan = _build_plan(session, config)
+        apply_plan(session=session, config=config, plan=plan)
+
+        first = restore_from_quarantine(session=session, target=source_file.id)
+        second = restore_from_quarantine(session=session, target=source_file.id)
+
+    assert first.conflict is False
+    assert first.original_path is not None
+    assert second.conflict is False
+    assert second.original_path == first.original_path
 
 
 def test_build_soft_review_plan_creates_manual_quarantine_move(tmp_path: Path) -> None:

@@ -263,3 +263,53 @@ test("createBlockedProvider returns live browse snapshot when configured", async
   assert.equal(description.live_connected, true);
   assert.equal(description.item_count, 1);
 });
+
+
+test("createBlockedProvider reports browse errors, serves cache, and recovers", async () => {
+  let browseService = {
+    browse(opts, cb) {
+      if (opts.pop_all) {
+        cb(false, { action: "list", list: { level: 0, count: 1 } });
+        return;
+      }
+      cb(false, { action: "list", list: { level: 1, count: 1 } });
+    },
+    load(opts, cb) {
+      if (opts.level === 0) {
+        cb(false, {
+          items: [{ title: "Hidden Artists", item_key: "hidden-artists", hint: "list" }],
+          list: { level: 0, count: 1 },
+          offset: 0,
+        });
+        return;
+      }
+      cb(false, {
+        items: [{ title: "Recovered Artist", hint: "list" }],
+        list: { level: 1, count: 1 },
+        offset: 0,
+      });
+    },
+  };
+  const provider = createBlockedProvider(
+    {
+      BRIDGE_BLOCKED_SOURCE: "roon_browse",
+      BRIDGE_BLOCKED_BROWSE_SPECS: JSON.stringify([
+        { path: ["Hidden Artists"], object_type: "artist" },
+      ]),
+      BRIDGE_BLOCKED_CACHE_SECONDS: "600",
+    },
+    {
+      getBrowseService: () => browseService,
+    },
+  );
+
+  const recovered = await provider.refresh({ force: true });
+  assert.equal(recovered.item_count, 1);
+  assert.equal(provider.describe().last_error, null);
+  assert.equal(provider.describe().item_count, 1);
+
+  browseService = null;
+  const cached = await provider.getSnapshot();
+  assert.equal(cached.item_count, 1);
+  assert.equal(cached.items[0].artist, "Recovered Artist");
+});

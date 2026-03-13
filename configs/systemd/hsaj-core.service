@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-/etc/hsaj/hsaj.env
 Environment=HSAJ_ROOT=/opt/hsaj
-ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj serve'
+ExecStart=/usr/bin/env bash -c 'cd "${HSAJ_ROOT}/core" && exec hsaj serve --config "${HSAJ_CONFIG}"'
 Restart=on-failure
 RestartSec=5s
 

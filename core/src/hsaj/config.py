@@ -157,6 +157,10 @@ class PolicyConfig(BaseModel):
         default=False,
         description="Whether files should be deleted automatically after quarantine expiry.",
     )
+    allow_hard_delete: bool = Field(
+        default=False,
+        description="Explicit acknowledgement gate required before auto_delete may remove files.",
+    )
     enable_behavior_scoring: bool = Field(
         default=True,
         description="Reserved flag for future soft-scoring heuristics.",
@@ -190,6 +194,23 @@ class BridgeConfig(BaseModel):
         default="v2",
         description="Expected blocked snapshot contract version.",
     )
+    required_source_mode: str | None = Field(
+        default=None,
+        description="Optional blocked snapshot source mode required for readiness and destructive flows.",
+    )
+    max_blocked_sync_age_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum age for the last successful blocked sync before readiness fails.",
+    )
+
+    @field_validator("required_source_mode")
+    @classmethod
+    def normalize_required_source_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class SecurityConfig(BaseModel):

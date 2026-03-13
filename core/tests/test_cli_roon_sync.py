@@ -1,12 +1,13 @@
 ﻿from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from hsaj.blocking import BlockedObject, sync_blocked_objects
+from hsaj.blocking import BlockedObject, BlockedSnapshot, sync_blocked_objects
 from hsaj.cli import _warm_track_cache, roon_sync_command
 from hsaj.config import DatabaseConfig
 from hsaj.db import init_database
@@ -72,20 +73,25 @@ def test_roon_sync_uses_policy_grace_days_from_config(tmp_path: Path, monkeypatc
         f"""
 database:
   driver: sqlite
-  path: {db_path.as_posix()}
+  path: {json.dumps(str(db_path))}
 paths:
   library_roots: []
 policy:
   block_grace_days: 12
-""".strip()
+""".strip(),
+        encoding="utf-8",
     )
 
     seen_at = datetime(2024, 2, 1, tzinfo=timezone.utc)
     monkeypatch.setattr(
         "hsaj.cli.fetch_blocked_from_bridge",
-        lambda base_url=None: [
-            BlockedObject(object_type="track", object_id="track-9", label="Track 9")
-        ],
+        lambda base_url=None: BlockedSnapshot(
+            items=[BlockedObject(object_type="track", object_id="track-9", label="Track 9")],
+            contract_version="v2",
+            generated_at=seen_at,
+            source_mode="inline_json",
+            item_count=1,
+        ),
     )
     monkeypatch.setattr("hsaj.cli.utc_now", lambda: seen_at)
 

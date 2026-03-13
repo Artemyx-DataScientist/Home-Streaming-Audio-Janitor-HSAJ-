@@ -2,7 +2,7 @@
 import { createRequire } from "node:module";
 
 import { WebSocket, WebSocketServer } from "ws";
-import { createBlockedProvider } from "./blocked.js";
+import { BLOCKED_CONTRACT_VERSION, createBlockedProvider } from "./blocked.js";
 
 const require = createRequire(import.meta.url);
 const RoonApi = require("node-roon-api");
@@ -15,7 +15,7 @@ const DEFAULT_HOST = process.env.BRIDGE_HOST ?? "127.0.0.1";
 const DEFAULT_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? process.env.PORT ?? "8080", 10);
 const BRIDGE_SOURCE = process.env.BRIDGE_SOURCE ?? "bridge";
 const SHARED_SECRET = (process.env.BRIDGE_SHARED_SECRET ?? "").trim();
-const CONTRACT_VERSION = "v1";
+const TRANSPORT_CONTRACT_VERSION = "v1";
 
 const isLoopbackHost = (host) =>
   host === "127.0.0.1" || host === "localhost" || host === "::1";
@@ -100,43 +100,73 @@ const buildBlockedSummary = (blockedProvider) => {
     return snapshot;
   } catch (error) {
     return {
-      ...(blockedProvider.describe ? blockedProvider.describe() : { configured: true, mode: "unknown" }),
+      configured: true,
+      mode: "unknown",
       status: "error",
       error: error.message,
     };
   }
 };
 
-const buildHealthResponse = (roonStatus, blockedProvider) => ({
-  status: "ok",
-  roon: roonStatus,
-  contract_version: CONTRACT_VERSION,
-  blocked_source: buildBlockedSummary(blockedProvider),
-  security: {
-    loopback_only: isLoopbackHost(DEFAULT_HOST),
-    auth_required: Boolean(SHARED_SECRET),
-  },
-});
+const evaluateBlockedSource = (blockedProvider) => {
+  const blockedSource = buildBlockedSummary(blockedProvider);
+  const reasons = [];
+  if (blockedSource.mode === "unconfigured" || blockedSource.configured === false) {
+    reasons.push("blocked source is not configured");
+  }
+  if (blockedSource.status === "error" || blockedSource.error) {
+    reasons.push(blockedSource.error ?? "blocked source provider reported an error");
+  }
+  if (blockedSource.last_error) {
+    reasons.push(blockedSource.last_error);
+  }
+  if (blockedSource.mode === "roon_browse_live" && blockedSource.live_connected === false) {
+    reasons.push("Roon browse service is not connected");
+  }
+  return {
+    healthy: reasons.length === 0,
+    reasons,
+    blockedSource: {
+      ...blockedSource,
+      health_status: reasons.length === 0 ? "ok" : "degraded",
+      health_reasons: reasons,
+    },
+  };
+};
+
+const buildHealthResponse = (roonStatus, blockedProvider) => {
+  const evaluation = evaluateBlockedSource(blockedProvider);
+  return {
+    status: evaluation.healthy ? "ok" : "degraded",
+    roon: roonStatus,
+    contract_version: TRANSPORT_CONTRACT_VERSION,
+    blocked_contract_version: BLOCKED_CONTRACT_VERSION,
+    contracts: {
+      transport_event: TRANSPORT_CONTRACT_VERSION,
+      blocked_snapshot: BLOCKED_CONTRACT_VERSION,
+    },
+    blocked_source: evaluation.blockedSource,
+    security: {
+      loopback_only: isLoopbackHost(DEFAULT_HOST),
+      auth_required: Boolean(SHARED_SECRET),
+    },
+  };
+};
 
 const buildReadyResponse = (roonStatus, blockedProvider) => {
-  const blockedSource = buildBlockedSummary(blockedProvider);
-  const blockedReady =
-    blockedSource.mode !== "unconfigured" &&
-    blockedSource.configured !== false &&
-    blockedSource.status !== "error" &&
-    (blockedSource.mode !== "roon_browse_live" || blockedSource.live_connected !== false) &&
-    !blockedSource.last_error;
-
+  const evaluation = evaluateBlockedSource(blockedProvider);
   return {
-    status: blockedReady ? "ready" : "not_ready",
+    status: evaluation.healthy ? "ready" : "not_ready",
     roon: roonStatus,
-    contract_version: CONTRACT_VERSION,
-    blocked_source: blockedSource,
+    contract_version: TRANSPORT_CONTRACT_VERSION,
+    blocked_contract_version: BLOCKED_CONTRACT_VERSION,
+    blocked_source: evaluation.blockedSource,
   };
 };
 
 const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
-  const blockedSource = buildBlockedSummary(blockedProvider);
+  const evaluation = evaluateBlockedSource(blockedProvider);
+  const blockedSource = evaluation.blockedSource;
   return [
     `hsaj_bridge_transport_events_total ${metrics.transportEventsTotal}`,
     `hsaj_bridge_track_start_total ${metrics.trackStartsTotal}`,
@@ -147,12 +177,14 @@ const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
     `hsaj_bridge_blocked_items ${blockedSource.item_count ?? 0}`,
     `hsaj_bridge_auth_required ${SHARED_SECRET ? 1 : 0}`,
     `hsaj_bridge_roon_connected ${roonStatus === "connected" ? 1 : 0}`,
+    `hsaj_bridge_blocked_source_healthy ${evaluation.healthy ? 1 : 0}`,
+    `hsaj_bridge_ready ${evaluation.healthy ? 1 : 0}`,
   ].join("\n") + "\n";
 };
 
 const buildTransportMessage = (payload, source) =>
   JSON.stringify({
-    contract_version: CONTRACT_VERSION,
+    contract_version: TRANSPORT_CONTRACT_VERSION,
     type: "transport_event",
     event: {
       ...payload,
@@ -341,12 +373,17 @@ const startApiServer = (
     const url = getRequestUrl(req);
 
     if (req.method === "GET" && url.pathname === "/live") {
-      sendJson(res, 200, { status: "live", contract_version: CONTRACT_VERSION });
+      sendJson(res, 200, {
+        status: "live",
+        contract_version: TRANSPORT_CONTRACT_VERSION,
+        blocked_contract_version: BLOCKED_CONTRACT_VERSION,
+      });
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
-      sendJson(res, 200, healthProvider());
+      const payload = healthProvider();
+      sendJson(res, payload.status === "ok" ? 200 : 503, payload);
       return;
     }
 

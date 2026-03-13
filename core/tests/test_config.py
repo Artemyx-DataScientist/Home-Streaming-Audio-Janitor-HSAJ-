@@ -24,6 +24,10 @@ policy:
   block_grace_days: 14
   quarantine_delete_days: 90
   auto_delete: true
+  allow_hard_delete: true
+bridge:
+  required_source_mode: roon_browse_live
+  max_blocked_sync_age_minutes: 45
 """
     )
 
@@ -38,6 +42,9 @@ policy:
     assert loaded.config.policy.block_grace_days == 14
     assert loaded.config.policy.quarantine_delete_days == 90
     assert loaded.config.policy.auto_delete is True
+    assert loaded.config.policy.allow_hard_delete is True
+    assert loaded.config.bridge.required_source_mode == "roon_browse_live"
+    assert loaded.config.bridge.max_blocked_sync_age_minutes == 45
 
 
 def test_load_config_empty_file(tmp_path: Path) -> None:

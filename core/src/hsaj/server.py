@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .config import HsajConfig
 from .db import database_status, init_database
+from .guardrails import SafetyError
 from .operator_service import (
     actions_payload,
     apply_preview_payload,
@@ -69,6 +70,11 @@ OPERATOR_HTML = """<!doctype html>
   </header>
   <main>
     <section>
+      <h2>Health</h2>
+      <pre id="health"></pre>
+      <pre id="ready"></pre>
+    </section>
+    <section>
       <h2>Stats</h2>
       <button onclick="refreshAll()">Refresh</button>
       <pre id="stats"></pre>
@@ -114,6 +120,8 @@ OPERATOR_HTML = """<!doctype html>
       return payload;
     }
     async function refreshAll() {
+      document.getElementById("health").textContent = JSON.stringify(await fetchJson("/health"), null, 2);
+      document.getElementById("ready").textContent = JSON.stringify(await fetchJson("/ready"), null, 2);
       document.getElementById("stats").textContent = JSON.stringify(await fetchJson("/stats"), null, 2);
       document.getElementById("candidates").textContent = JSON.stringify(await fetchJson("/candidates"), null, 2);
       document.getElementById("actions").textContent = JSON.stringify(await fetchJson("/actions"), null, 2);
@@ -219,10 +227,16 @@ OPERATOR_HTML = """<!doctype html>
 
 
 def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
-    engine, _ = init_database(config.database)
+    engine = None
+    schema_version = None
+    boot_error = None
+    try:
+        engine, schema_version = init_database(config.database)
+    except Exception as exc:  # pragma: no cover - exercised via HTTP boundary tests
+        boot_error = f"Database init failed: {exc}"
     scheduler = (
         BackgroundScheduler(engine=engine, config=config)
-        if config.runtime.enable_background_jobs
+        if config.runtime.enable_background_jobs and engine is not None
         else None
     )
     if scheduler is not None:
@@ -255,15 +269,54 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 self._with_session(lambda session: liveness_payload(session, config))
                 return
             if parsed.path == "/health":
+                if boot_error is not None and engine is None:
+                    payload = health_payload(
+                        None,
+                        config,
+                        schema_version=schema_version,
+                        boot_error=boot_error,
+                    )
+                    self._send_json(
+                        payload,
+                        status=(
+                            HTTPStatus.OK
+                            if payload.get("status") == "ok"
+                            else HTTPStatus.SERVICE_UNAVAILABLE
+                        ),
+                    )
+                    return
                 self._with_session(
                     lambda session: health_payload(
-                        session, config, schema_version=database_status(config.database)
-                    )
+                        session,
+                        config,
+                        schema_version=(
+                            schema_version
+                            if boot_error is not None
+                            else (schema_version or database_status(config.database))
+                        ),
+                        boot_error=boot_error,
+                    ),
+                    status_builder=lambda payload: (
+                        HTTPStatus.OK
+                        if payload.get("status") == "ok"
+                        else HTTPStatus.SERVICE_UNAVAILABLE
+                    ),
                 )
                 return
             if parsed.path == "/ready":
+                if boot_error is not None and engine is None:
+                    payload = readiness_payload(None, config, boot_error=boot_error)
+                    self._send_json(
+                        payload,
+                        status=(
+                            HTTPStatus.OK
+                            if payload.get("status") == "ready"
+                            else HTTPStatus.SERVICE_UNAVAILABLE
+                        ),
+                    )
+                    return
                 self._with_session(
-                    lambda session: readiness_payload(session, config),
+                    lambda session: readiness_payload(session, config, boot_error=boot_error),
                     status_builder=lambda payload: (
                         HTTPStatus.OK
                         if payload.get("status") == "ready"
@@ -272,7 +325,12 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
                 )
                 return
             if parsed.path == "/metrics":
-                self._with_session_text(lambda session: metrics_payload(session, config))
+                if boot_error is not None and engine is None:
+                    self._send_text(metrics_payload(None, config, boot_error=boot_error))
+                    return
+                self._with_session_text(
+                    lambda session: metrics_payload(session, config, boot_error=boot_error)
+                )
                 return
             if not self._authorize():
                 return
@@ -383,12 +441,20 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
             status_builder: Callable[[Any], HTTPStatus] | None = None,
         ) -> None:
             try:
+                if boot_error is not None and engine is None:
+                    raise SafetyError(boot_error)
                 with Session(engine) as session:
                     payload = builder(session)
             except KeyError as exc:
                 self._send_json(
                     {"message": "Not Found", "detail": str(exc)},
                     status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            except SafetyError as exc:
+                self._send_json(
+                    {"message": "Service Unavailable", "detail": str(exc)},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
                 return
             except Exception as exc:  # pragma: no cover - defensive HTTP boundary
@@ -402,8 +468,16 @@ def serve_operator_api(config: HsajConfig) -> ThreadingHTTPServer:
 
         def _with_session_text(self, builder: Callable[[Session], str]) -> None:
             try:
+                if boot_error is not None and engine is None:
+                    raise SafetyError(boot_error)
                 with Session(engine) as session:
                     payload = builder(session)
+            except SafetyError as exc:
+                self._send_json(
+                    {"message": "Service Unavailable", "detail": str(exc)},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
             except Exception as exc:  # pragma: no cover - defensive HTTP boundary
                 self._send_json(
                     {"message": "Internal Server Error", "detail": str(exc)},

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .blocking import (
     BlockedSnapshot,
     ensure_blocked_contract_version,
+    ensure_blocked_source_mode,
     fetch_blocked_snapshot_from_bridge,
     record_blocked_sync_failure,
     record_blocked_sync_success,
@@ -22,6 +23,7 @@ from .db import database_status, init_database
 from .db.models import BlockCandidate, PlayHistory, RoonItemCache
 from .exemptions import add_exemption, deactivate_exemption, list_exemptions
 from .executor import apply_plan, cleanup_retention, restore_from_quarantine
+from .guardrails import SafetyError
 from .logging_utils import configure_logging
 from .planner import build_plan
 from .roon import BridgeClientError, cache_roon_track, fetch_track_from_bridge
@@ -266,8 +268,12 @@ def apply_command(
 
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
-        plan = build_plan(session=session, config=loaded.config)
-        result = apply_plan(session=session, config=loaded.config, plan=plan, dry_run=dry_run)
+        try:
+            plan = build_plan(session=session, config=loaded.config)
+            result = apply_plan(session=session, config=loaded.config, plan=plan, dry_run=dry_run)
+        except SafetyError as exc:
+            typer.secho(str(exc), err=True, fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
 
     if dry_run:
         typer.echo("dry_run: no files were changed; plan and dry_run entries were logged")
@@ -412,6 +418,10 @@ def roon_sync_command(
             snapshot,
             expected_contract=loaded.config.bridge.contract_version,
         )
+        ensure_blocked_source_mode(
+            snapshot,
+            expected_source_mode=loaded.config.bridge.required_source_mode,
+        )
     except BridgeClientError as exc:
         with Session(engine) as session:
             record_blocked_sync_failure(session, error=str(exc))
@@ -504,7 +514,11 @@ def cleanup_command(
 
     engine, _ = init_database(loaded.config.database)
     with Session(engine) as session:
-        result = cleanup_retention(session=session, config=loaded.config)
+        try:
+            result = cleanup_retention(session=session, config=loaded.config)
+        except SafetyError as exc:
+            typer.secho(str(exc), err=True, fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
 
     typer.echo(
         f"Cleanup finished. deleted={len(result.deleted_candidates)} "

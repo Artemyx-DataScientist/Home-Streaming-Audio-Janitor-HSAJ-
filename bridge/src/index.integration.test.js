@@ -62,6 +62,25 @@ const waitForWsOpen = async (url) =>
   });
 
 
+const waitForWsOpenWithHeaders = async (url, headers) =>
+  new Promise((resolve, reject) => {
+    const socket = new WebSocket(url, { headers });
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`Timed out opening websocket ${url}`));
+    }, 3000);
+    socket.once("open", () => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve();
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+
+
 test("bridge exposes live, ready, health, and metrics endpoints", async () => {
   const port = String(19080 + Math.floor(Math.random() * 500));
   const child = spawn("node", ["src/index.js"], {
@@ -80,6 +99,7 @@ test("bridge exposes live, ready, health, and metrics endpoints", async () => {
     assert.equal(liveResponse.status, 200);
     const livePayload = await liveResponse.json();
     assert.equal(livePayload.status, "live");
+    assert.equal(livePayload.blocked_contract_version, "v2");
 
     const readyResponse = await waitForHttp(`http://127.0.0.1:${port}/ready`);
     assert.equal(readyResponse.status, 200);
@@ -90,14 +110,17 @@ test("bridge exposes live, ready, health, and metrics endpoints", async () => {
     assert.equal(healthResponse.status, 200);
     const healthPayload = await healthResponse.json();
     assert.equal(healthPayload.contract_version, "v1");
+    assert.equal(healthPayload.blocked_contract_version, "v2");
     assert.equal(healthPayload.blocked_source.configured, true);
     assert.equal(healthPayload.blocked_source.contract_version, "v2");
+    assert.equal(healthPayload.blocked_source.health_status, "ok");
 
     const metricsResponse = await waitForHttp(`http://127.0.0.1:${port}/metrics`);
     assert.equal(metricsResponse.status, 200);
     const metricsPayload = await metricsResponse.text();
     assert.match(metricsPayload, /hsaj_bridge_transport_events_total/);
     assert.match(metricsPayload, /hsaj_bridge_blocked_items/);
+    assert.match(metricsPayload, /hsaj_bridge_ready 1/);
 
     const blockedResponse = await waitForHttp(`http://127.0.0.1:${port}/blocked`);
     assert.equal(blockedResponse.status, 200);
@@ -140,6 +163,9 @@ test("bridge enforces shared secret on blocked HTTP and websocket routes", async
     assert.equal(unauthorizedStatus, 401);
 
     await waitForWsOpen(`ws://127.0.0.1:${port}/events?token=${secret}`);
+    await waitForWsOpenWithHeaders(`ws://127.0.0.1:${port}/events`, {
+      "X-HSAJ-Token": secret,
+    });
   } finally {
     child.kill("SIGTERM");
   }
@@ -164,6 +190,12 @@ test("bridge ready probe degrades when live blocked browse source is unavailable
 
   try {
     await waitForHttp(`http://127.0.0.1:${port}/live`);
+    const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(healthResponse.status, 503);
+    const healthPayload = await healthResponse.json();
+    assert.equal(healthPayload.status, "degraded");
+    assert.equal(healthPayload.blocked_source.health_status, "degraded");
+
     const readyResponse = await fetch(`http://127.0.0.1:${port}/ready`);
     assert.equal(readyResponse.status, 503);
     const readyPayload = await readyResponse.json();

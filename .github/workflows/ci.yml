@@ -43,3 +43,40 @@ jobs:
         run: black --check .
       - name: Run Pytest
         run: pytest
+
+  bootstrap-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Install ffprobe
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Bootstrap clean-room environment
+        run: python3 tools/bootstrap.py --recreate-venv
+      - name: Run smoke example
+        run: core/.venv/bin/python tools/smoke_example.py
+
+  core-windows-smoke:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install core dependencies
+        run: py -3.11 -m pip install -r requirements-dev.txt
+      - name: Run config-resolution smoke
+        run: py -3.11 -m pytest tests/test_config.py

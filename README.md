@@ -4,22 +4,38 @@ HSAJ is split into two parts:
 - `bridge/` is a Node.js bridge that connects to Roon, exposes HTTP endpoints, and broadcasts transport events over WebSocket.
 - `core/` is a Python engine that scans the library, stores metadata in SQLite, builds previewable plans, applies quarantine/Atmos actions, manages retention, and serves an operator API/UI.
 
-## Development setup
+## Canonical production path
+
+The canonical production model is:
+- `bridge/` runs as the Roon bridge and blocked-source provider
+- `core/` runs `hsaj serve --config /etc/hsaj/hsaj.yaml`
+- blocked sync and cleanup run as built-in background jobs inside `hsaj serve`
+
+The older timer-driven `scan + roon sync + apply --dry-run` path is still available as a legacy/dev smoke flow, but it is no longer the primary operations story.
+
+## Bootstrap
 
 Requirements:
 - Node.js 18+
 - Python 3.11+
 - `npm`
+- `ffprobe` on `PATH`
 
-Install dependencies:
+Bootstrap a clean environment:
 ```bash
-cd bridge
-npm install
-cd ../core
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
+python3 tools/bootstrap.py --recreate-venv
 ```
+
+This checks Python/Node versions, fails fast if `ffprobe` is missing, creates `core/.venv`, installs `core` dependencies, and runs `npm ci` in `bridge/`.
+
+One-shot smoke entrypoint:
+```bash
+core/.venv/bin/python tools/smoke_example.py
+```
+
+`tools/smoke_example.py` creates a temporary config derived from `configs/hsaj.example.yaml`, starts the real bridge and core processes, waits for `/ready`, and runs `scan -> plan -> validate -> apply -> restore -> cleanup`.
+
+## Local development
 
 Run the bridge:
 ```bash
@@ -31,7 +47,7 @@ Run the core listener:
 ```bash
 cd core
 source .venv/bin/activate
-hsaj listen --config configs/hsaj.yaml
+hsaj listen --config ../configs/hsaj.yaml
 ```
 
 Run the operator API and background runtime jobs:
@@ -51,6 +67,7 @@ The bridge exposes:
 
 `GET /health` now also reports:
 - `contract_version`
+- `blocked_contract_version`
 - `blocked_source`
 - `security`
 
@@ -59,7 +76,7 @@ Operational bridge probes:
 - `GET /ready`
 - `GET /metrics`
 
-`GET /ready` is dependency-aware for the blocked source. In live browse mode it returns a non-ready status until the Roon browse service is connected and the blocked provider is healthy.
+`GET /health` and `GET /ready` are dependency-aware for the blocked source. In live browse mode the bridge degrades until the Roon browse service is connected and the blocked provider is healthy.
 
 Observed transport events are sourced from Roon transport subscriptions. Demo tracks and demo blocks are no longer used.
 `/blocked` returns a versioned snapshot envelope with `contract_version`, `generated_at`, `source`, `item_count`, `object_types`, and `items`.
@@ -77,7 +94,7 @@ Optional hardening:
 - set `BRIDGE_SHARED_SECRET` to require `X-HSAJ-Token` on HTTP and `?token=` or the same header on WebSocket
 - set `HSAJ_BRIDGE_TOKEN` in the core environment so HTTP and WS clients authenticate automatically
 - configure a live Roon browse source with `BRIDGE_BLOCKED_SOURCE=roon_browse` and `BRIDGE_BLOCKED_BROWSE_SPECS='[...]'`
-- or set `BRIDGE_BLOCKED_FILE=/path/to/blocked.json` / `BRIDGE_BLOCKED_JSON='[...]'` as a fallback static feed
+- keep `BRIDGE_BLOCKED_FILE=/path/to/blocked.json` / `BRIDGE_BLOCKED_JSON='[...]'` only for tests, demos, and controlled imports
 
 Do not expose the bridge publicly without a shared secret.
 
@@ -119,7 +136,7 @@ Common commands:
 
 `hsaj cleanup` applies quarantine retention policy:
 - if `policy.auto_delete=false`, expired candidates are marked as `expired`
-- if `policy.auto_delete=true`, due quarantine files are physically deleted and logged
+- if `policy.auto_delete=true` and `policy.allow_hard_delete=true`, due quarantine files are physically deleted and logged as `quarantine_delete`
 
 `hsaj serve` starts the operator API and a thin built-in UI. The core exposes:
 - `GET /`
@@ -149,7 +166,13 @@ If `security.operator_token` or `HSAJ_OPERATOR_TOKEN` is set, operator routes re
 `X-HSAJ-Operator-Token`. Health, live, ready, and metrics remain available for probes.
 
 Core health and metrics also expose the last persisted blocked-sync status, including whether the most recent bridge fetch succeeded, which blocked contract version was seen, and how many blocked objects were in the last snapshot.
-`GET /ready` is dependency-aware and returns a non-ready status if required library roots are missing, `ffprobe` cannot be resolved, quarantine is not configured, or blocked sync is stale/failing while background jobs are enabled.
+`GET /ready` is dependency-aware and returns a non-ready status if:
+- DB bootstrap failed
+- required library roots are missing
+- `ffprobe` cannot be resolved
+- quarantine is not configured
+- `policy.auto_delete=true` without `policy.allow_hard_delete=true`
+- blocked sync is stale, failing, on the wrong contract version, or on the wrong source mode
 
 Background runtime jobs can be enabled inside `hsaj serve`:
 
@@ -179,6 +202,14 @@ Stored previews are now validated before apply. The core checks that:
 uses the same validation pass before executing any moves. Invalid preview items are skipped and
 reported back in the response instead of being applied silently.
 
+Destructive guardrails:
+- `bridge.contract_version` enforces the blocked snapshot contract
+- `bridge.required_source_mode` can require `roon_browse_live` in production
+- `bridge.max_blocked_sync_age_minutes` bounds blocked-sync staleness
+- `policy.allow_hard_delete` is an explicit second gate for physical deletion
+
+If these guardrails fail, `apply`, `cleanup`, readiness, health, metrics, and the operator UI explain why execution is blocked instead of silently proceeding.
+
 Soft candidates are advisory only. Operators can:
 - dismiss them, which suppresses the same advisory signal for that file
 - convert them into a file-level exemption
@@ -189,10 +220,12 @@ Soft candidates are advisory only. Operators can:
 GitHub Actions runs:
 - `npm ci && npm test` in `bridge`
 - formatting and tests in `core`
+- a clean-room bootstrap smoke on Ubuntu
+- a smaller Windows smoke for core path/config handling
 
 ## Systemd
 
-Systemd service files live under `configs/systemd/`. The canonical production path is `hsaj-core.service` running `hsaj serve`, with `hsaj-core.timer` optionally driving `hsaj-maintenance.service`. See [docs/systemd.md](docs/systemd.md).
+Systemd service files live under `configs/systemd/`. The canonical production path is `hsaj-core.service` running `hsaj serve --config "${HSAJ_CONFIG}"`, with `hsaj-maintenance.service` and `hsaj-core.timer` kept only as a legacy/dev smoke path. See [docs/systemd.md](docs/systemd.md).
 
 ## License
 

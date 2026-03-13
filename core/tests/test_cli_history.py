@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,10 +19,11 @@ def test_history_command_shows_recent_entries(tmp_path: Path, capsys) -> None:
         f"""
 database:
   driver: sqlite
-  path: {db_path.as_posix()}
+  path: {json.dumps(str(db_path))}
 paths:
   library_roots: []
-""".strip()
+""".strip(),
+        encoding="utf-8",
     )
 
     engine, _ = init_database(DatabaseConfig(driver="sqlite", path=db_path))
