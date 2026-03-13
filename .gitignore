@@ -18,3 +18,4 @@ core/.ruff_cache
 .vscode
 .idea
 /core/uv.lock
+%TEMP%/
