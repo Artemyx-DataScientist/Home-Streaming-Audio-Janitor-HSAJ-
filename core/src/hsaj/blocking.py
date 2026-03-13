@@ -91,6 +91,21 @@ class BlockedSnapshot:
     item_count: int
 
 
+def ensure_blocked_contract_version(
+    snapshot: BlockedSnapshot,
+    *,
+    expected_contract: str | None,
+) -> None:
+    expected = (expected_contract or "").strip() or None
+    if expected is None:
+        return
+    actual = (snapshot.contract_version or "").strip() or None
+    if actual != expected:
+        raise BridgeClientError(
+            f"Blocked contract mismatch: expected {expected}, got {actual or 'legacy'}"
+        )
+
+
 def _reason_for(blocked: BlockedObject) -> str:
     return f"blocked_by_{blocked.object_type}"
 

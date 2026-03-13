@@ -33,7 +33,7 @@ policy:
 bridge:
   http_url: http://127.0.0.1:8080
   ws_url: ws://127.0.0.1:8080/events
-  contract_version: v1
+  contract_version: v2
 
 security:
   operator_host: 127.0.0.1

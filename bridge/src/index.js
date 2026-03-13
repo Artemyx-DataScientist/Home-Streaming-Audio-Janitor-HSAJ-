@@ -118,12 +118,22 @@ const buildHealthResponse = (roonStatus, blockedProvider) => ({
   },
 });
 
-const buildReadyResponse = (roonStatus, blockedProvider) => ({
-  status: "ready",
-  roon: roonStatus,
-  contract_version: CONTRACT_VERSION,
-  blocked_source: buildBlockedSummary(blockedProvider),
-});
+const buildReadyResponse = (roonStatus, blockedProvider) => {
+  const blockedSource = buildBlockedSummary(blockedProvider);
+  const blockedReady =
+    blockedSource.mode !== "unconfigured" &&
+    blockedSource.configured !== false &&
+    blockedSource.status !== "error" &&
+    (blockedSource.mode !== "roon_browse_live" || blockedSource.live_connected !== false) &&
+    !blockedSource.last_error;
+
+  return {
+    status: blockedReady ? "ready" : "not_ready",
+    roon: roonStatus,
+    contract_version: CONTRACT_VERSION,
+    blocked_source: blockedSource,
+  };
+};
 
 const buildMetricsResponse = (metrics, roonStatus, blockedProvider) => {
   const blockedSource = buildBlockedSummary(blockedProvider);
@@ -341,7 +351,8 @@ const startApiServer = (
     }
 
     if (req.method === "GET" && url.pathname === "/ready") {
-      sendJson(res, 200, readyProvider());
+      const payload = readyProvider();
+      sendJson(res, payload.status === "ready" ? 200 : 503, payload);
       return;
     }
 

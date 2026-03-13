@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -186,8 +187,8 @@ class BridgeConfig(BaseModel):
         description="WebSocket URL for bridge transport events.",
     )
     contract_version: str = Field(
-        default="v1",
-        description="Expected bridge contract version.",
+        default="v2",
+        description="Expected blocked snapshot contract version.",
     )
 
 
@@ -301,6 +302,13 @@ class HsajConfig(BaseModel):
             resolved_paths.ffprobe_path = str((base_path / ffprobe_candidate).resolve())
 
         return self.model_copy(update={"database": resolved_db, "paths": resolved_paths})
+
+    def ffprobe_resolved_path(self) -> Path | None:
+        candidate = Path(self.paths.ffprobe_path)
+        if candidate.is_absolute():
+            return candidate
+        resolved = shutil.which(self.paths.ffprobe_path)
+        return Path(resolved) if resolved else None
 
 
 @dataclass

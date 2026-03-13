@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .blocking import (
     BlockedSnapshot,
+    ensure_blocked_contract_version,
     fetch_blocked_snapshot_from_bridge,
     record_blocked_sync_failure,
     record_blocked_sync_success,
@@ -406,6 +407,17 @@ def roon_sync_command(
             source_mode=None,
             item_count=len(items),
         )
+    try:
+        ensure_blocked_contract_version(
+            snapshot,
+            expected_contract=loaded.config.bridge.contract_version,
+        )
+    except BridgeClientError as exc:
+        with Session(engine) as session:
+            record_blocked_sync_failure(session, error=str(exc))
+            session.commit()
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
 
     cache_result = TrackCacheWarmupResult()
     resolved_grace_days = (

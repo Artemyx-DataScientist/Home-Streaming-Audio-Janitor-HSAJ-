@@ -19,12 +19,22 @@ from hsaj.scanner import sync_library_graph
 
 
 def _base_config(tmp_path: Path) -> HsajConfig:
+    library_root = tmp_path / "library"
+    quarantine_dir = tmp_path / "quarantine"
+    atmos_dir = tmp_path / "atmos"
+    ffprobe_path = tmp_path / "bin" / "ffprobe"
+    library_root.mkdir(parents=True, exist_ok=True)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    atmos_dir.mkdir(parents=True, exist_ok=True)
+    ffprobe_path.parent.mkdir(parents=True, exist_ok=True)
+    ffprobe_path.write_text("stub")
     return HsajConfig(
         database=DatabaseConfig(driver="sqlite", path=tmp_path / "hsaj.db"),
         paths=PathsConfig(
-            library_roots=[tmp_path / "library"],
-            quarantine_dir=tmp_path / "quarantine",
-            atmos_dir=tmp_path / "atmos",
+            library_roots=[library_root],
+            quarantine_dir=quarantine_dir,
+            atmos_dir=atmos_dir,
+            ffprobe_path=str(ffprobe_path),
         ),
     )
 
@@ -532,6 +542,56 @@ def test_cleanup_retention_marks_expired_without_auto_delete(tmp_path: Path) -> 
         assert result.expired_candidates == [candidate.id]
         assert refreshed_candidate is not None
         assert refreshed_candidate.status == "expired"
+
+
+def test_cleanup_retention_deletes_files_when_auto_delete_enabled(tmp_path: Path) -> None:
+    config = _base_config(tmp_path)
+    config.policy.quarantine_delete_days = 1
+    config.policy.auto_delete = True
+    engine, _ = init_database(config.database)
+
+    with Session(engine) as session:
+        original_path = config.paths.library_roots[0] / "Artist/Album/track.flac"
+        _create_file(session, path=original_path)
+        _cache_track(
+            session,
+            RoonTrack(
+                roon_track_id="track-1",
+                artist="Artist",
+                album="Album",
+                title="Title",
+                duration_ms=300_000,
+                track_number=1,
+            ),
+        )
+        candidate = _add_candidate(session)
+        plan = _build_plan(session, config)
+        apply_plan(session=session, config=config, plan=plan)
+
+        candidate = session.get(BlockCandidate, candidate.id)
+        assert candidate is not None
+        quarantine_path = Path(
+            session.query(ActionLog)
+            .filter(ActionLog.action == "quarantine_move")
+            .one()
+            .target_path
+        )
+        assert quarantine_path.exists()
+
+        result = cleanup_retention(
+            session=session,
+            config=config,
+            now=candidate.delete_after,
+        )
+
+        refreshed_candidate = session.get(BlockCandidate, candidate.id)
+        assert result.deleted_candidates == [candidate.id]
+        assert refreshed_candidate is not None
+        assert refreshed_candidate.status == "deleted"
+        assert not quarantine_path.exists()
+        assert session.get(File, plan.blocked_quarantine_due[0].file_id) is None
+        delete_log = session.query(ActionLog).filter(ActionLog.action == "quarantine_delete").one()
+        assert delete_log.target_path == str(quarantine_path)
 
 
 def test_soft_candidate_dismissal_suppresses_future_plans(tmp_path: Path) -> None:
