@@ -35,6 +35,23 @@ core/.venv/bin/python tools/smoke_example.py
 
 `tools/smoke_example.py` creates a temporary config derived from `configs/hsaj.example.yaml`, starts the real bridge and core processes, waits for `/ready`, and runs `scan -> plan -> validate -> apply -> restore -> cleanup`.
 
+## Install On A RoonServer Host
+
+For a Linux machine that already runs `RoonServer`, the recommended deployment path is now a single installer:
+
+```bash
+sudo python3 tools/install_linux.py --install-root /opt/hsaj --config-dir /etc/hsaj --generate-secrets --enable-services
+```
+
+What it does:
+- copies the current checkout to `/opt/hsaj`
+- bootstraps `core/.venv` and bridge dependencies
+- installs example config and env files into `/etc/hsaj`
+- installs systemd units
+- reloads systemd and enables `hsaj-bridge.service` and `hsaj-core.service`
+
+After that, edit `/etc/hsaj/hsaj.yaml` and `/etc/hsaj/hsaj.env` for your library paths, blocked browse specs, and auth settings, then verify `/ready` on both services.
+
 ## Local development
 
 Run the bridge:

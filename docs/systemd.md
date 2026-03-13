@@ -13,19 +13,27 @@ All files live in `configs/systemd` and assume environment settings from `/etc/h
 
 ## Environment preparation
 1. Install Node.js 18+, Python 3.11+, and `ffprobe`.
-2. Deploy HSAJ to a target directory, typically `/opt/hsaj`.
-3. Run the clean-room bootstrap:
+2. Preferred path on a RoonServer host: run the installer from the repository checkout:
+   ```bash
+   sudo python3 tools/install_linux.py \
+     --install-root /opt/hsaj \
+     --config-dir /etc/hsaj \
+     --generate-secrets \
+     --enable-services
+   ```
+3. Manual path, if you do not want the installer: deploy HSAJ to a target directory, typically `/opt/hsaj`.
+4. Run the clean-room bootstrap:
    ```bash
    cd /opt/hsaj
    python3 tools/bootstrap.py --recreate-venv
    ```
-4. Copy the example core config:
+5. Copy the example core config:
    ```bash
    sudo install -d /etc/hsaj
    sudo cp configs/hsaj.example.yaml /etc/hsaj/hsaj.yaml
    sudo chown root:root /etc/hsaj/hsaj.yaml
    ```
-5. Copy the systemd env file:
+6. Copy the systemd env file:
    ```bash
    sudo cp configs/systemd/hsaj.env.example /etc/hsaj/hsaj.env
    sudo chmod 640 /etc/hsaj/hsaj.env
